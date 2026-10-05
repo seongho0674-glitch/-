@@ -83,8 +83,8 @@ export async function renderTeacher(app, view) {
       <section class="stats-grid" aria-label="오늘의 요약">
         <div class="stat s1"><div class="stat-label">👩‍🎓 학생 수</div><div class="stat-value">${studs.length}<small>명</small></div></div>
         <div class="stat s2"><div class="stat-label">💰 학급 전체 잔액</div><div class="stat-value">${fmt(total)}<small>${cur()}</small></div></div>
-        <div class="stat s3"><div class="stat-label">🎁 오늘 지급 / 차감</div><div class="stat-value"><span class="plus">+${fmt(st.today.given)}</span> <small>/</small> <span class="minus" style="font-size:22px">−${fmt(st.today.taken)}</span></div></div>
-        <div class="stat s4"><div class="stat-label">⭐ 평균 레벨 · 오늘 구매</div><div class="stat-value">Lv.${avgLv} <small>· ${st.today.purchases}건</small></div></div>
+        <div class="stat s3"><div class="stat-label">🎁 오늘 지급 / 차감</div><div class="stat-value"><span class="plus">+${fmt(st.today?.given ?? 0)}</span> <small>/</small> <span class="minus" style="font-size:22px">−${fmt(st.today?.taken ?? 0)}</span></div></div>
+        <div class="stat s4"><div class="stat-label">⭐ 평균 레벨 · 오늘 구매</div><div class="stat-value">Lv.${avgLv} <small>· ${st.today?.purchases ?? 0}건</small></div></div>
       </section>
 
       <div class="toolbar" role="toolbar" aria-label="일괄 지급 도구">
@@ -106,7 +106,9 @@ export async function renderTeacher(app, view) {
           <tbody>
             ${studs.map((s) => {
               const r = roleOf(s);
-              const pct = Math.round((s.expInLevel / s.expToNext) * 100);
+              const expIn = s.expInLevel || 0;
+              const expTo = s.expToNext || 100;
+              const pct = Math.round((expIn / expTo) * 100);
               return `
               <tr data-id="${esc(s.id)}" data-name="${esc(s.name)}" class="${selected.has(s.id) ? 'selected' : ''} ${flashIds.includes(s.id) ? 'flash' : ''}">
                 <td><input type="checkbox" class="chk row-chk" ${selected.has(s.id) ? 'checked' : ''} aria-label="${esc(s.name)} 선택"></td>

@@ -164,12 +164,35 @@ export function resetLocalDB() {
   return seeded;
 }
 
+export function levelInfo(exp) {
+  let level = 1, remain = Number(exp || 0);
+  while (remain >= level * 100) {
+    remain -= level * 100;
+    level += 1;
+  }
+  return { level, expInLevel: remain, expToNext: level * 100 };
+}
+
+export function studentView(s, includePin = false) {
+  const keys = ['id', 'number', 'name', 'balance', 'exp', 'roleId',
+    'animal', 'homeCity', 'claimedCities', 'claimedTiles', 'energy', 'friends'];
+  const out = {};
+  for (const k of keys) {
+    if (k in s) out[k] = s[k];
+  }
+  Object.assign(out, levelInfo(s.exp || 0));
+  if (includePin) {
+    out.pin = s.pin;
+  }
+  return out;
+}
+
 // 모의 API 라우터
 export async function handleMockAPI(path, { method = 'GET', body = null, token = null } = {}) {
   const db = getLocalDB();
 
   // Helper
-  const findStudent = (id) => db.students.find(s => s.id === id);
+  const findStudent = (id) => db.students.find(s => String(s.id) === String(id));
   const getSessionStudentId = () => {
     if (!token) return null;
     if (token.startsWith('s_token_')) {
@@ -183,7 +206,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     return {
       className: db.settings.className,
       currencyName: db.settings.currencyName,
-      students: db.students.map(s => ({ id: s.id, number: s.number, name: s.name }))
+      students: [...db.students].sort((a, b) => a.number - b.number).map(s => ({ id: s.id, number: s.number, name: s.name }))
     };
   }
 
@@ -222,33 +245,19 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
   if (path === '/student/me' && method === 'GET') {
     const sid = getSessionStudentId();
     const s = findStudent(sid) || db.students[0];
-    const level = Math.floor((s.exp || 0) / 100) + 1;
-    const maxExp = level * 100;
     const role = db.roles.find(r => r.id === s.roleId) || null;
-    const todayTasks = role ? role.tasks : [];
-    const txs = db.transactions.filter(t => t.studentId === s.id).slice(-30).reverse();
-    const myItems = db.transactions
-      .filter(t => t.studentId === s.id && t.type === 'buy')
-      .map(t => {
-        const it = db.items.find(i => t.reason.includes(i.name)) || { emoji: '🎁', name: t.reason, type: 'coupon' };
-        return {
-          id: t.id,
-          name: it.name,
-          emoji: it.emoji,
-          type: it.type,
-          price: Math.abs(t.amount),
-          boughtAt: t.createdAt
-        };
-      });
+    const mine = (db.transactions || []).filter(t => t.studentId === s.id);
+    mine.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return {
-      ...s,
-      level,
-      maxExp,
+      settings: {
+        className: db.settings.className,
+        currencyName: db.settings.currencyName
+      },
+      student: studentView(s, false),
       role,
-      todayTasks,
-      transactions: txs,
-      myItems
+      transactions: mine.slice(0, 100),
+      purchases: mine.filter(t => t.type === 'buy')
     };
   }
 
@@ -262,20 +271,26 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     const sid = getSessionStudentId();
     const s = findStudent(sid);
     if (!s) throw new Error('학생 정보를 찾을 수 없어요.');
-    const item = db.items.find(i => i.id === body?.itemId);
+    const item = db.items.find(i => String(i.id) === String(body?.itemId));
     if (!item || !item.active) throw new Error('판매 중인 상품이 아니에요.');
-    if (s.balance < item.price) throw new Error(`${db.settings.currencyName}이 부족해요.`);
+    if (s.balance < item.price) throw new Error(`${db.settings.currencyName}이(가) ${item.price - s.balance}만큼 부족해요.`);
 
     s.balance -= item.price;
     const tx = {
-      id: uid('tx'),
+      id: uid('t'),
       studentId: s.id,
       studentName: s.name,
       type: 'buy',
-      amount: -item.price,
-      reason: `${item.name} 구매`,
+      amount: item.price,
+      reason: `상점 구매: ${item.name}`,
+      itemId: item.id,
+      itemName: item.name,
+      itemEmoji: item.emoji || '🎁',
+      itemType: item.type,
+      balanceAfter: s.balance,
       createdAt: nowStr()
     };
+    if (!db.transactions) db.transactions = [];
     db.transactions.push(tx);
     saveLocalDB(db);
     return { ok: true, balance: s.balance, transaction: tx };
@@ -306,44 +321,38 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     if (!s.claimedCities.includes(cityId)) {
       s.claimedCities.push(cityId);
     }
-    if (animalName) s.animal.name = animalName;
-    if (animalEmoji) s.animal.emoji = animalEmoji;
+    if (animalName && s.animal) s.animal.name = animalName;
+    if (animalEmoji && s.animal) s.animal.emoji = animalEmoji;
     saveLocalDB(db);
-    return { ok: true, student: s };
+    return { ok: true, student: studentView(s) };
   }
 
   // 4. 교사 영역
   if (path === '/teacher/state' && method === 'GET') {
-    const totalBalance = db.students.reduce((acc, cur) => acc + (cur.balance || 0), 0);
-    const totalExp = db.students.reduce((acc, cur) => acc + (cur.exp || 0), 0);
-    const activeRoles = db.students.filter(s => !!s.roleId).length;
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const txs = db.transactions || [];
+    const given = txs.filter(t => t.type === 'give' && (t.createdAt || '').startsWith(todayStr)).reduce((a, t) => a + (t.amount || 0), 0);
+    const taken = txs.filter(t => t.type === 'take' && (t.createdAt || '').startsWith(todayStr)).reduce((a, t) => a + (t.amount || 0), 0);
+    const purchases = txs.filter(t => t.type === 'buy' && (t.createdAt || '').startsWith(todayStr)).length;
+
+    const sortedStudents = [...db.students].sort((a, b) => (a.number || 0) - (b.number || 0));
 
     return {
-      settings: db.settings,
-      students: db.students.map(s => {
-        const level = Math.floor((s.exp || 0) / 100) + 1;
-        const role = db.roles.find(r => r.id === s.roleId);
-        return {
-          ...s,
-          level,
-          roleName: role ? role.name : null,
-          roleEmoji: role ? role.emoji : null
-        };
-      }),
+      settings: {
+        className: db.settings.className,
+        currencyName: db.settings.currencyName,
+        defaultPin: db.settings.teacherPin === '0000'
+      },
+      students: sortedStudents.map(s => studentView(s, true)),
       roles: db.roles,
       items: db.items,
-      stats: {
-        totalStudents: db.students.length,
-        totalBalance,
-        totalExp,
-        activeRoles
-      }
+      today: { given, taken, purchases }
     };
   }
 
   if (path === '/teacher/transactions' && method === 'GET') {
     return {
-      transactions: db.transactions.slice().reverse()
+      transactions: (db.transactions || []).slice().reverse()
     };
   }
 
@@ -360,39 +369,47 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
         animalTitle: owner?.animal?.title || null
       };
     });
-    return { cities, students: db.students };
+    return { cities, students: db.students.map(s => studentView(s, false)) };
   }
 
   if (path === '/teacher/pay' && method === 'POST') {
-    const { studentIds, type, amount, reason } = body || {};
+    const { studentIds, type: kind, amount, reason } = body || {};
+    if (!['give', 'take'].includes(kind)) throw new Error('지급 또는 차감을 선택해 주세요.');
     const amt = Number(amount);
     if (!amt || amt <= 0) throw new Error('금액을 올바르게 입력해 주세요.');
-    const now = nowStr();
-    const createdTxs = [];
+    const ids = Array.isArray(studentIds) ? studentIds : [];
+    if (!ids.length) throw new Error('학생을 한 명 이상 골라 주세요.');
+    const stamp = nowStr();
+    const results = [];
 
-    for (const sid of (studentIds || [])) {
+    if (!db.transactions) db.transactions = [];
+
+    for (const sid of ids) {
       const s = findStudent(sid);
       if (!s) continue;
-      if (type === 'pay') {
-        s.balance += amt;
-        s.exp += amt;
+      const before = levelInfo(s.exp).level;
+      if (kind === 'give') {
+        s.balance = (s.balance || 0) + amt;
+        s.exp = (s.exp || 0) + amt;
       } else {
-        s.balance -= amt;
+        s.balance = (s.balance || 0) - amt;
       }
+      const after = levelInfo(s.exp).level;
       const tx = {
-        id: uid('tx'),
+        id: uid('t'),
         studentId: s.id,
         studentName: s.name,
-        type,
-        amount: type === 'pay' ? amt : -amt,
-        reason: reason || (type === 'pay' ? '선생님 지급' : '선생님 차감'),
-        createdAt: now
+        type: kind,
+        amount: amt,
+        reason: reason || (kind === 'give' ? '선생님 지급' : '선생님 차감'),
+        balanceAfter: s.balance,
+        createdAt: stamp
       };
       db.transactions.push(tx);
-      createdTxs.push(tx);
+      results.push({ id: s.id, name: s.name, levelUp: after > before, level: after });
     }
     saveLocalDB(db);
-    return { ok: true, count: createdTxs.length };
+    return { ok: true, results };
   }
 
   // 교사 상품 관리
