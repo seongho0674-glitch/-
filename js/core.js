@@ -63,11 +63,13 @@ export function getAppMode() {
 export async function api(path, { method = 'GET', body } = {}) {
   const s = session.get();
 
-  // GitHub Pages 등 정적 웹 호스팅 환경에서는 즉시 브라우저 로컬 저장소 모드 사용
+  // 1. 호스팅 환경 감지: Vercel, GitHub Pages, Netlify 등 온라인 웹 환경에서는 즉시 브라우저 로컬 저장소 모드 사용
   if (isMockMode === null) {
-    if (location.hostname.endsWith('github.io') || location.protocol === 'file:') {
+    const host = location.hostname.toLowerCase();
+    const isLocalServer = host === 'localhost' || host === '127.0.0.1' || host.startsWith('192.168.') || host.startsWith('10.');
+    if (!isLocalServer || location.protocol === 'file:') {
       isMockMode = true;
-      console.log('Classimal World: 정적 웹 호스팅(GitHub Pages) 감지 -> 브라우저 로컬 저장소 모드로 작동합니다.');
+      console.log(`Classimal World: 웹 호스팅(${host}) 감지 -> 브라우저 로컬 저장소 모드로 작동합니다.`);
     }
   }
 
@@ -75,18 +77,26 @@ export async function api(path, { method = 'GET', body } = {}) {
     return await handleMockAPI(path, { method, body, token: s?.token });
   }
 
+  // 2. 로컬 서버 연결 시도
   const headers = { 'Content-Type': 'application/json' };
   if (s?.token) headers.Authorization = `Bearer ${s.token}`;
   let res;
   try {
     res = await fetch(`/api${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
-    isMockMode = false;
   } catch {
     // 백엔드 서버가 켜져 있지 않은 경우 자동으로 브라우저 로컬 모드로 전환
-    console.warn(`백엔드 서버(/api${path}) 연결 불가. 브라우저 로컬 저장소 모드로 자동 전환합니다.`);
+    console.warn(`Classimal World: 백엔드 서버 연결 불가. 브라우저 로컬 저장소 모드로 전환합니다.`);
     isMockMode = true;
     return await handleMockAPI(path, { method, body, token: s?.token });
   }
+
+  // 3. API 경로가 없는 정적 호스팅(404)일 경우 로컬 모드로 즉시 전환
+  if (res.status === 404) {
+    console.warn(`Classimal World: API 라우트 없음(404). 브라우저 로컬 저장소 모드로 전환합니다.`);
+    isMockMode = true;
+    return await handleMockAPI(path, { method, body, token: s?.token });
+  }
+
   let data = null;
   try { data = await res.json(); } catch { /* 비어 있는 응답 */ }
   if (res.status === 401) {
@@ -95,7 +105,15 @@ export async function api(path, { method = 'GET', body } = {}) {
     location.hash = '#/';
     throw new Error(data?.error || '다시 들어와 주세요.');
   }
-  if (!res.ok) throw new Error(data?.error || '오류가 발생했어요.');
+  if (!res.ok) {
+    if (res.status >= 500) {
+      isMockMode = true;
+      return await handleMockAPI(path, { method, body, token: s?.token });
+    }
+    throw new Error(data?.error || '오류가 발생했어요.');
+  }
+
+  isMockMode = false;
   return data;
 }
 
