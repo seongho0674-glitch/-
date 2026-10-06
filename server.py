@@ -5,6 +5,8 @@
 - 데이터는 data/db.json 파일에 저장됩니다.
 - 실행: python server.py  (또는 '실행하기.bat' 더블클릭)
 """
+import base64
+import binascii
 import json
 import mimetypes
 import os
@@ -21,8 +23,9 @@ from urllib.parse import urlparse, unquote
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.environ.get("CLASS_ECONOMY_DATA_DIR") or os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "db.json")
+ROSTER_PATH = os.path.join(BASE_DIR, "class-roster.json")
 PORT = int(os.environ.get("PORT", "8000"))
 
 LOCK = threading.RLock()          # 데이터 변경은 항상 이 잠금 안에서 처리
@@ -54,6 +57,68 @@ def new_id(prefix):
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
+def load_class_roster():
+    if not os.path.isfile(ROSTER_PATH):
+        return None
+    with open(ROSTER_PATH, "r", encoding="utf-8-sig") as f:
+        roster = json.load(f)
+    if not isinstance(roster, dict) or not isinstance(roster.get("students"), list) or not isinstance(roster.get("roles"), list):
+        raise ValueError("학급 명단 설정을 확인해 주세요.")
+    return roster
+
+
+def has_student_reference(value, student_id):
+    if isinstance(value, dict):
+        return student_id in value or any(has_student_reference(v, student_id) for v in value.values())
+    if isinstance(value, list):
+        return any(has_student_reference(v, student_id) for v in value)
+    return value == student_id
+
+
+def apply_class_roster(db):
+    """처음 한 번 명단과 직책을 넣고, 교사가 이후에 편집한 명단은 그대로 보존합니다."""
+    if db.setdefault("settings", {}).get("rosterVersion", 0) >= 1:
+        return False
+    roster = load_class_roster()
+    if not roster:
+        return False
+    students = db.setdefault("students", [])
+    used_roles = {s.get("roleId") for s in students if s.get("roleId")}
+    old_role_names = {"칠판 지킴이", "전등 관리자", "창문 관리자", "학급 문고 사서", "분리수거 대장",
+                      "식물 돌보미", "우체부", "급식 도우미", "일정 알리미", "청소 반장", "IT 도우미", "학급 은행원"}
+    roles = db.setdefault("roles", [])
+    roles[:] = [r for r in roles if r.get("name") not in old_role_names or r.get("id") in used_roles]
+    for record in roster["roles"]:
+        role = next((r for r in roles if r.get("id") == record["id"]), None)
+        if role:
+            role.update(record)
+        else:
+            roles.append({**record, "createdAt": now_str()})
+    matched_ids = set()
+    for record in roster["students"]:
+        student = next((s for s in students if s.get("id") not in matched_ids and s.get("name") == record["name"]), None)
+        if not student:
+            student = next((s for s in students if s.get("id") not in matched_ids
+                            and s.get("number") == record["number"] and re.fullmatch(r"\d+번 학생", s.get("name", ""))), None)
+        if not student:
+            student = {"id": new_id("s"), "pin": "1234", "balance": 0, "exp": 0, "createdAt": now_str()}
+            students.append(student)
+        student.update({"number": record["number"], "name": record["name"], "roleId": record.get("roleId")})
+        matched_ids.add(student["id"])
+    other_data = {k: v for k, v in db.items() if k != "students"}
+    configured_numbers = {record["number"] for record in roster["students"]}
+    students[:] = [s for s in students if not (
+        s["id"] not in matched_ids and s.get("number") not in configured_numbers
+        and re.fullmatch(r"\d+번 학생", s.get("name", ""))
+        and not s.get("balance") and not s.get("exp")
+        and not s.get("roleId") and s.get("pin", "1234") == "1234"
+        and int(s.get("characterLevel", 1)) <= 1 and not s.get("territoryPurchases")
+        and len(s.get("claimedCities", [])) <= 1 and int(s.get("claimedTiles", 6)) <= 6
+        and not has_student_reference(other_data, s["id"]))]
+    db["settings"]["rosterVersion"] = 1
+    return True
+
+
 def seed_db():
     roles_seed = [
         ("🧽", "칠판 지킴이", ["쉬는 시간마다 칠판 지우기", "분필·보드마커 정리하기"]),
@@ -74,14 +139,14 @@ def seed_db():
         for e, n, t in roles_seed
     ]
     items_seed = [
-        ("🪑", "자리 바꾸기 쿠폰", "coupon", 50, "원하는 친구와 하루 동안 자리를 바꿔요."),
-        ("🎵", "음악 들으며 공부 쿠폰", "coupon", 30, "자습 시간에 이어폰으로 음악을 들어요."),
-        ("📝", "숙제 하루 면제 쿠폰", "coupon", 80, "숙제 한 번을 면제받아요. (선생님 확인 필요)"),
-        ("🍽️", "급식 먼저 먹기 쿠폰", "coupon", 40, "하루 동안 급식 줄 맨 앞에 서요."),
+        ("🪑", "자리 바꾸기 교환권", "coupon", 150, SEAT_DESC),
         ("🧑‍🏫", "일일 선생님 쿠폰", "coupon", 120, "아침 활동 시간을 내가 진행해요."),
-        ("✏️", "캐릭터 연필", "goods", 20, "귀여운 캐릭터 연필 한 자루"),
-        ("🍬", "간식 뽑기", "goods", 15, "간식 상자에서 한 개를 골라요."),
-        ("📒", "미니 노트", "goods", 25, "손바닥만 한 귀여운 노트"),
+        ("📝", "숙제 하루 면제 쿠폰", "coupon", 100, "숙제 한 번을 면제받아요. (선생님 확인 필요)"),
+        ("🍽️", "급식 먼저 먹기 쿠폰", "coupon", 60, "하루 동안 급식 줄 맨 앞에 서요."),
+        ("🎵", "음악 들으며 공부 쿠폰", "coupon", 40, "자습 시간에 이어폰으로 음악을 들어요."),
+        ("📒", "알림장 면제", "coupon", 100, "알림장 한 번을 면제받아요. (선생님 확인 필요)"),
+        ("✏️", "학용품", "goods", 200, "학급 상점에서 학용품을 골라요."),
+        ("🍬", "간식 뽑기", "goods", 50, "간식 상자에서 한 개를 골라요."),
     ]
     items = [
         {"id": new_id("i"), "emoji": e, "name": n, "type": t, "price": p,
@@ -93,14 +158,113 @@ def seed_db():
          "balance": 0, "exp": 0, "roleId": None, "createdAt": now_str()}
         for i in range(1, 26)
     ]
-    return {
-        "version": 1,
-        "settings": {"className": "6학년 1반", "currencyName": "코인", "teacherPin": "0000"},
+    db = {
+        "version": 3,
+        "settings": {"className": "6학년 1반", "currencyName": "코인", "teacherPin": "0000",
+                     "luckEnabled": True, "peGoalDays": 10},
         "students": students,
         "roles": roles,
         "items": items,
         "transactions": [],
+        "missions": seed_missions(),
+        "submissions": [],
+        "assignments": [],
+        "vote": None,
+        "peEvents": [],
     }
+    apply_class_roster(db)
+    return db
+
+
+# ─────────────────────────── 미션 · 학급 회의 · 행운의 게임 규칙 ───────────────────────────
+# (id, 아이콘, 이름, 보상, 설명, 매일 하는 미션, 신청할 때 적을 내용(비우면 안 적음), 종류)
+MISSIONS_SEED = [
+    ("m_teacher", "📝", "선생님 과제", 10, "선생님이 올린 학습지나 과제를 풀고 인증해요", False, "답안을 적고 인증해요", "assignment"),
+    ("m_role", "🧩", "1인 1역", 10, "내가 맡은 역할을 끝까지 해냈어요", True, "", "role"),
+    ("m_pypx_archive", "🗂️", "PYPX 아카이빙", 30, "PYPX 탐구 과정을 사진·글로 기록하고 정리했어요", False, "무엇을 기록·정리했나요?", ""),
+    ("m_pypx_solve", "💡", "PYPX 탐구 해결", 40, "탐구 질문을 해결하고 알게 된 점을 나눴어요", False, "어떤 탐구 질문을 해결했나요?", ""),
+    ("m_reading", "📖", "독서노트", 10, "책을 읽고 독서노트를 썼어요", False, "읽은 책 제목", ""),
+    ("m_notice", "📒", "알림장", 5, "오늘 알림장을 빠짐없이 적었어요", True, "", ""),
+    ("m_supplies", "🎒", "준비물 챙겨오기", 5, "오늘 필요한 준비물을 챙겨 왔어요", True, "", ""),
+    ("m_pyp_reading", "🔎", "PYP 관련 독서 인증", 15, "탐구 주제와 관련된 책을 읽고 인증했어요", False, "책 제목과 관련된 탐구 주제", ""),
+]
+
+SEAT_DESC = "원하는 친구와 하루 동안 자리를 바꿔요. 가장 귀한 교환권!"
+# 처음 기본 상품의 (예전 가격, 새 가격): 선생님이 가격을 바꾸지 않은 상품만 한 번 정리
+ITEM_PRICE_UPDATE = {
+    "자리 바꾸기 쿠폰": (50, 150),
+    "일일 선생님 쿠폰": (120, 120),
+    "숙제 하루 면제 쿠폰": (80, 100),
+    "급식 먼저 먹기 쿠폰": (40, 60),
+    "음악 들으며 공부 쿠폰": (30, 40),
+    "미니 노트": (25, 30),
+    "캐릭터 연필": (20, 25),
+    "간식 뽑기": (15, 20),
+}
+
+LUCK_BET = 10        # 행운의 게임에 거는 화폐 = 기본 미션(1인 1역) 1개 보상
+LUCK_FEE = 1         # 수수료 10% (게임마다 사라짐 → 오래 할수록 줄어들고, 물가 오름도 막음)
+LUCK_DAILY = 5       # 하루에 할 수 있는 횟수
+PE_PASS_RATE = 70    # 자율 체육 학급 회의 통과 기준 (전체 학생 중 찬성 %)
+
+
+def seed_missions():
+    return [
+        {"id": i, "emoji": e, "name": n, "reward": r, "desc": d, "daily": daily, "prompt": p,
+         "kind": k, "active": True, "createdAt": now_str()}
+        for i, e, n, r, d, daily, p, k in MISSIONS_SEED
+    ]
+
+
+def migrate_db(db):
+    """예전 데이터에 새 기능 칸을 채우고(지우는 것 없음), 기본 상품 가격을 한 번 정리합니다."""
+    changed = False
+    st = db.setdefault("settings", {})
+    for key, value in (("luckEnabled", True), ("peGoalDays", 10)):
+        if key not in st:
+            st[key] = value
+            changed = True
+    if not isinstance(db.get("missions"), list):
+        db["missions"] = seed_missions()
+        changed = True
+    for key in ("submissions", "peEvents", "assignments"):
+        if not isinstance(db.get(key), list):
+            db[key] = []
+            changed = True
+    if "vote" not in db:
+        db["vote"] = None
+        changed = True
+    if int(db.get("version", 1)) < 2:
+        for it in db.get("items", []):
+            upd = ITEM_PRICE_UPDATE.get(it.get("name"))
+            if upd and it.get("price") == upd[0]:
+                it["price"] = upd[1]
+                if it["name"] == "자리 바꾸기 쿠폰":
+                    it["name"] = "자리 바꾸기 교환권"
+                    it["description"] = SEAT_DESC
+        db["version"] = 2
+        changed = True
+    if int(db.get("version", 1)) < 3:
+        updates = {
+            "캐릭터 연필": {"name": "학용품", "type": "goods", "price": 200,
+                        "description": "학급 상점에서 학용품을 골라요."},
+            "미니 노트": {"name": "알림장 면제", "type": "coupon", "price": 100,
+                       "description": "알림장 한 번을 면제받아요. (선생님 확인 필요)"},
+            "미니노트": {"name": "알림장 면제", "type": "coupon", "price": 100,
+                      "description": "알림장 한 번을 면제받아요. (선생님 확인 필요)"},
+            "간식 뽑기": {"price": 50},
+        }
+        for item in db.get("items", []):
+            update = updates.get(item.get("name"))
+            if update:
+                item.update(update)
+        if not any(m.get("id") == "m_teacher" for m in db["missions"]):
+            db["missions"].append(next(m for m in seed_missions() if m["id"] == "m_teacher"))
+        db["version"] = 3
+        changed = True
+    if apply_class_roster(db):
+        changed = True
+    return changed
 
 
 
@@ -475,6 +639,17 @@ def ensure_student_fields(db):
         if "claimedTiles" not in s:
             s["claimedTiles"] = 6
             changed = True
+        if not isinstance(s.get("claimedCityTiles"), dict):
+            other_cities = [city for city in s["claimedCities"] if city != s["homeCity"]]
+            s["claimedCityTiles"] = {city: 3 for city in other_cities}
+            s["claimedCityTiles"][s["homeCity"]] = max(1, int(s["claimedTiles"]) - 3 * len(other_cities))
+            changed = True
+        if "characterLevel" not in s:
+            s["characterLevel"] = 1
+            changed = True
+        if "territoryPurchases" not in s:
+            s["territoryPurchases"] = 0
+            changed = True
         if "energy" not in s:
             s["energy"] = 2
             changed = True
@@ -494,6 +669,8 @@ def load_db():
         return db
     with open(DB_PATH, "r", encoding="utf-8") as f:
         db = json.load(f)
+    if migrate_db(db):
+        save_db(db)
     ensure_student_fields(db)
     return db
 
@@ -532,9 +709,14 @@ def find(lst, _id):
 
 def student_view(s, include_pin=False):
     keys = ("id", "number", "name", "balance", "exp", "roleId",
-            "animal", "homeCity", "claimedCities", "claimedTiles", "energy", "friends")
+            "animal", "homeCity", "claimedCities", "claimedTiles", "energy", "friends",
+            "characterLevel", "territoryPurchases")
     out = {k: s.get(k) for k in keys if k in s}
     out.update(level_info(s["exp"]))
+    character_level = int(s.get("characterLevel", 1))
+    purchases = int(s.get("territoryPurchases", 0))
+    out.update({"characterLevel": character_level, "nextUpgradeCost": character_level * 10 if character_level < 101 else None,
+                "territoryPurchases": purchases, "nextTerritoryCost": (purchases + 1) * 200})
     if include_pin:
         out["pin"] = s["pin"]
     return out
@@ -657,6 +839,13 @@ def api_student_me(ctx):
         "role": role,
         "transactions": mine[:100],
         "purchases": [t for t in mine if t["type"] == "buy"],
+        "missions": [m for m in DB["missions"] if m.get("active", True)],
+        "mySubmissions": today_submissions(s["id"]),
+        "assignments": [assignment_view(a) for a in DB["assignments"] if assignment_visible(a, s)],
+        "myAssignmentSubmissions": [x for x in DB["submissions"] if x["studentId"] == s["id"] and x.get("assignmentId")],
+        "taxInfo": tax_info(s),
+        "classGoal": class_goal(viewer=s["id"]),
+        "luck": luck_info(s),
     }
 
 
@@ -689,12 +878,21 @@ def api_teacher_state(ctx):
     given = sum(t["amount"] for t in DB["transactions"] if t["type"] == "give" and t["createdAt"].startswith(today))
     taken = sum(t["amount"] for t in DB["transactions"] if t["type"] == "take" and t["createdAt"].startswith(today))
     bought = sum(1 for t in DB["transactions"] if t["type"] == "buy" and t["createdAt"].startswith(today))
+    luck_today = [t for t in DB["transactions"] if t["type"] == "luck" and t["createdAt"].startswith(today)]
     return {
-        "settings": {**public_settings(), "defaultPin": DB["settings"]["teacherPin"] == "0000"},
+        "settings": {**public_settings(), "defaultPin": DB["settings"]["teacherPin"] == "0000",
+                     "luckEnabled": bool(DB["settings"].get("luckEnabled", True)),
+                     "peGoalDays": int(DB["settings"].get("peGoalDays", 10))},
         "students": [student_view(s, include_pin=True) for s in sorted_students()],
         "roles": DB["roles"],
         "items": DB["items"],
         "today": {"given": given, "taken": taken, "purchases": bought},
+        "missions": DB["missions"],
+        "pendingCount": sum(1 for x in DB["submissions"] if x["status"] == "pending"),
+        "classGoal": class_goal(teacher=True),
+        "luck": {"todayPlays": len(luck_today), "todayFees": sum(t.get("fee", 0) for t in luck_today),
+                 **class_luck_totals()},
+        "addresses": [f"http://{ip}:{PORT}" for ip in local_ips()],   # 학생 기기에서 접속할 주소
     }
 
 
@@ -716,23 +914,41 @@ def api_teacher_pay(ctx):
     targets = [find(DB["students"], str(i)) for i in ids]
     if any(t is None for t in targets):
         raise ApiError(404, "찾을 수 없는 학생이 있어요.")
+    # 미션 버튼으로 지급하면 그 학생은 오늘 그 미션을 받은 것으로 기록 (같은 날 두 번 받지 않게)
+    mission = find(DB["missions"], str(body.get("missionId") or "")) if kind == "give" else None
+    if kind == "give" and (body.get("missionId") == "m_teacher" or (mission and mission.get("kind") == "assignment")):
+        raise ApiError(400, "선생님 과제는 제출한 답안을 확인하고 승인해 주세요.")
     stamp = now_str()
-    result = []
+    result, skipped = [], []
     for s in targets:
-        before = level_info(s["exp"])["level"]
         if kind == "give":
-            s["balance"] += amount
-            s["exp"] += amount          # 받은 만큼 경험치도 쌓임
+            if mission and not mark_mission_paid(s, mission, amount, stamp):
+                skipped.append(s["name"])
+                continue
+            result.append(pay_student(s, amount, reason, stamp))
         else:
             s["balance"] -= amount      # 교사 차감은 마이너스 허용, 경험치는 그대로
-        DB["transactions"].append({
-            "id": new_id("t"), "studentId": s["id"], "studentName": s["name"], "type": kind,
-            "amount": amount, "reason": reason, "balanceAfter": s["balance"], "createdAt": stamp,
-        })
-        after = level_info(s["exp"])["level"]
-        result.append({"id": s["id"], "name": s["name"], "levelUp": after > before, "level": after})
+            DB["transactions"].append({
+                "id": new_id("t"), "studentId": s["id"], "studentName": s["name"], "type": kind,
+                "amount": amount, "reason": reason, "balanceAfter": s["balance"], "createdAt": stamp,
+            })
+            lv = level_info(s["exp"])["level"]
+            result.append({"id": s["id"], "name": s["name"], "levelUp": False, "level": lv})
     save_db(DB)
-    return {"ok": True, "results": result}
+    return {"ok": True, "results": result, "skipped": skipped}
+
+
+def pay_student(s, amount, reason, stamp):
+    """지급: 받은 만큼 경험치도 함께 쌓인다"""
+    before = level_info(s["exp"])["level"]
+    s["balance"] += amount
+    s["exp"] += amount
+    DB["transactions"].append({
+        "id": new_id("t"), "studentId": s["id"], "studentName": s["name"], "type": "give",
+        "amount": amount, "reason": reason[:60], "balanceAfter": s["balance"], "createdAt": stamp,
+    })
+    after = level_info(s["exp"])["level"]
+    return {"id": s["id"], "name": s["name"], "levelUp": after > before, "level": after}
 
 
 def parse_item(body):
@@ -843,6 +1059,7 @@ def api_student_create(ctx):
     s = {"id": new_id("s"), "number": number, "name": req_str(body, "name", "이름", 12),
          "pin": req_pin(body), "balance": 0, "exp": 0, "roleId": None, "createdAt": now_str()}
     DB["students"].append(s)
+    ensure_student_fields(DB)   # 새 학생에게도 수호동물·시작 도시를 바로 정해 줌
     save_db(DB)
     return {"ok": True, "student": student_view(s, True)}
 
@@ -880,6 +1097,10 @@ def api_settings(ctx):
     st["currencyName"] = req_str(body, "currencyName", "화폐 이름", 10)
     if body.get("teacherPin"):
         st["teacherPin"] = req_pin(body, "teacherPin")
+    if "luckEnabled" in body:
+        st["luckEnabled"] = bool(body.get("luckEnabled"))
+    if body.get("peGoalDays") not in (None, ""):
+        st["peGoalDays"] = req_int(body, "peGoalDays", "자율 체육 목표 일수", 1, 60)
     save_db(DB)
     return {"ok": True}
 
@@ -897,6 +1118,8 @@ def api_restore(ctx):
     if not all(isinstance(data[k], list) for k in keys[1:]):
         raise ApiError(400, "올바른 백업 파일이 아니에요.")
     DB = data
+    migrate_db(DB)              # 예전 백업에도 미션·학급 회의 칸을 채움
+    ensure_student_fields(DB)   # 예전 백업에도 수호동물·도시 정보를 채움
     save_db(DB)
     # 학생 세션은 모두 초기화 (학생 목록이 바뀌었을 수 있음)
     for tok in [t for t, v in SESSIONS.items() if v["role"] == "student"]:
@@ -931,11 +1154,12 @@ def api_world_cities(ctx):
                     "number": s["number"],
                     "name": s["name"],
                     "level": lvl,
+                    "characterLevel": int(s.get("characterLevel", 1)),
                     "animal": animal,
                     "isHome": is_home,
-                    "tiles": tiles if is_home else 3
+                    "tiles": s.get("claimedCityTiles", {}).get(c_id, tiles if is_home else 3)
                 })
-                city_map[c_id]["totalTiles"] += (tiles if is_home else 3)
+                city_map[c_id]["totalTiles"] += s.get("claimedCityTiles", {}).get(c_id, tiles if is_home else 3)
 
     return {
         "cities": list(city_map.values()),
@@ -956,34 +1180,20 @@ def api_student_claim_city(ctx):
     if city_id in claimed:
         raise ApiError(400, "이미 개척한 도시예요!")
 
-    # 개척 비용: 30 코인
-    COST = 30
-    cur_name = DB["settings"]["currencyName"]
-    if s["balance"] < COST:
-        raise ApiError(400, f"새 도시를 개척하려면 {cur_name}이(가) {COST - s['balance']}만큼 더 필요해요. (필요: {COST} {cur_name})")
-
-    s["balance"] -= COST
+    purchases = int(s.get("territoryPurchases", 0))
+    tx = spend_student(s, (purchases + 1) * 200, "territory", f"{city['name']} 영토 1칸 개척", cityId=city_id)
     claimed.append(city_id)
-    s["claimedTiles"] = s.get("claimedTiles", 6) + 4
+    s["claimedTiles"] = s.get("claimedTiles", 6) + 1
+    s.setdefault("claimedCityTiles", {})[city_id] = 1
+    s["territoryPurchases"] = purchases + 1
     s["energy"] = max(0, s.get("energy", 2) - 1)
-
-    tx = {
-        "id": new_id("t"),
-        "studentId": s["id"],
-        "studentName": s["name"],
-        "type": "buy",
-        "amount": COST,
-        "reason": f"3D 월드 탐험: {city['name']} 영토 개척",
-        "balanceAfter": s["balance"],
-        "createdAt": now_str()
-    }
-    DB["transactions"].append(tx)
     save_db(DB)
 
     return {
         "ok": True,
         "message": f"축하해요! {city['name']}에 내 깃발을 꽂았어요! 🚩",
         "city": city,
+        "transaction": tx,
         "student": student_view(s)
     }
 
@@ -1007,9 +1217,500 @@ def api_student_update_animal(ctx):
     return {"ok": True, "animal": s["animal"], "student": student_view(s)}
 
 
+# ─────────────────────────── 코인으로 성장 · 세금 ───────────────────────────
+def spend_student(s, amount, kind, reason, **extra):
+    if s["balance"] < amount:
+        raise ApiError(400, f"{DB['settings']['currencyName']}이(가) {amount - s['balance']}만큼 부족해요.")
+    s["balance"] -= amount
+    tx = {
+        "id": new_id("t"), "studentId": s["id"], "studentName": s["name"], "type": kind,
+        "amount": amount, "reason": reason, "balanceAfter": s["balance"], "createdAt": now_str(),
+        **extra,
+    }
+    DB["transactions"].append(tx)
+    return tx
+
+
+def tax_info(s):
+    today = today_str()
+    paid = {t.get("taxType") for t in DB["transactions"]
+            if t.get("studentId") == s["id"] and t.get("type") == "tax"
+            and (t.get("date") or t.get("createdAt", "")[:10]) == today}
+    return {"date": today, "incomePaid": "income" in paid, "propertyPaid": "property" in paid,
+            "propertyDue": s["balance"] > 100 and "property" not in paid}
+
+
+def api_student_tax(ctx):
+    s = current_student(ctx)
+    kind = ctx["body"].get("type")
+    if kind not in ("income", "property"):
+        raise ApiError(400, "소득세 또는 재산세를 골라 주세요.")
+    info = tax_info(s)
+    if info["incomePaid" if kind == "income" else "propertyPaid"]:
+        raise ApiError(400, "오늘은 이미 납부한 세금이에요.")
+    if kind == "property" and s["balance"] <= 100:
+        raise ApiError(400, "재산세는 잔액이 100코인을 넘을 때 납부해요.")
+    tx = spend_student(s, 10, "tax", "소득세 납부" if kind == "income" else "재산세 납부",
+                       taxType=kind, date=info["date"])
+    save_db(DB)
+    return {"ok": True, "transaction": tx, "student": student_view(s), "taxInfo": tax_info(s)}
+
+
+def api_student_upgrade_character(ctx):
+    s = current_student(ctx)
+    level = int(s.get("characterLevel", 1))
+    if level >= 101:
+        raise ApiError(400, "캐릭터가 최고 레벨에 도달했어요!")
+    tx = spend_student(s, level * 10, "upgrade", f"캐릭터 업그레이드: Lv.{level} → Lv.{level + 1}")
+    s["characterLevel"] = level + 1
+    save_db(DB)
+    return {"ok": True, "transaction": tx, "student": student_view(s)}
+
+
+def api_student_expand_territory(ctx):
+    s = current_student(ctx)
+    purchases = int(s.get("territoryPurchases", 0))
+    tx = spend_student(s, (purchases + 1) * 200, "territory", "내 영토 1칸 확장")
+    s["claimedTiles"] = int(s.get("claimedTiles", 6)) + 1
+    tiles = s.setdefault("claimedCityTiles", {})
+    home = s.get("homeCity", "seoul")
+    tiles[home] = int(tiles.get(home, s["claimedTiles"] - 1)) + 1
+    s["territoryPurchases"] = purchases + 1
+    save_db(DB)
+    return {"ok": True, "transaction": tx, "student": student_view(s)}
+
+
+# ─────────────────────────── 선생님 과제 · PDF 학습지 ───────────────────────────
+PDF_MAX_BYTES = 5 * 1024 * 1024
+PDF_PREFIX = "data:application/pdf;base64,"
+
+
+def assignment_view(assignment):
+    out = {k: v for k, v in assignment.items() if k != "pdfData"}
+    out["hasPdf"] = bool(assignment.get("pdfData"))
+    return out
+
+
+def assignment_visible(assignment, student):
+    ids = assignment.get("studentIds") or []
+    return bool(assignment.get("active", True)) and (not ids or student["id"] in ids)
+
+
+def assignment_pdf(assignment):
+    if not assignment:
+        raise ApiError(404, "과제를 찾을 수 없어요.")
+    if not assignment.get("pdfData"):
+        raise ApiError(404, "이 과제에는 PDF 학습지가 없어요.")
+    return {"pdfName": assignment["pdfName"], "pdfData": assignment["pdfData"]}
+
+
+def api_teacher_assignments(ctx):
+    return {"assignments": [assignment_view(a) for a in reversed(DB["assignments"])]}
+
+
+def api_teacher_assignment_create(ctx):
+    body = ctx["body"]
+    title = req_str(body, "title", "과제 제목", 100)
+    instructions = req_str(body, "instructions", "안내", 3000, required=False)
+    reward = req_int(body, "reward", "보상", 1, 1000)
+    ids = body.get("studentIds", [])
+    if not isinstance(ids, list) or any(not isinstance(i, str) for i in ids):
+        raise ApiError(400, "과제를 받을 학생을 확인해 주세요.")
+    ids = list(dict.fromkeys(ids))
+    if any(not find(DB["students"], i) for i in ids):
+        raise ApiError(404, "찾을 수 없는 학생이 있어요.")
+    pdf_data = body.get("pdfData") or ""
+    pdf_name = req_str(body, "pdfName", "PDF 파일 이름", 150, required=False)
+    if pdf_data:
+        if not isinstance(pdf_data, str) or not pdf_data.startswith(PDF_PREFIX):
+            raise ApiError(400, "PDF 파일을 선택해 주세요.")
+        encoded = pdf_data[len(PDF_PREFIX):]
+        if len(encoded) > ((PDF_MAX_BYTES + 2) // 3) * 4:
+            raise ApiError(413, "PDF 파일은 5MB 이하로 올려 주세요.")
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            raise ApiError(400, "PDF 파일을 읽을 수 없어요. 다시 선택해 주세요.")
+        if len(decoded) > PDF_MAX_BYTES:
+            raise ApiError(413, "PDF 파일은 5MB 이하로 올려 주세요.")
+        if not decoded.startswith(b"%PDF-"):
+            raise ApiError(400, "올바른 PDF 파일이 아니에요.")
+        if not pdf_name:
+            raise ApiError(400, "PDF 파일 이름을 입력해 주세요.")
+    else:
+        pdf_name = ""
+    assignment = {
+        "id": new_id("a"), "title": title, "instructions": instructions, "reward": reward,
+        "studentIds": ids, "pdfName": pdf_name, "pdfData": pdf_data,
+        "active": True, "createdAt": now_str(),
+    }
+    DB["assignments"].append(assignment)
+    save_db(DB)
+    return {"ok": True, "assignment": assignment_view(assignment)}
+
+
+def api_teacher_assignment_delete(ctx):
+    assignment = find(DB["assignments"], ctx["params"][0])
+    if not assignment:
+        raise ApiError(404, "과제를 찾을 수 없어요.")
+    assignment["active"] = False
+    save_db(DB)
+    return {"ok": True}
+
+
+def api_teacher_assignment_pdf(ctx):
+    return assignment_pdf(find(DB["assignments"], ctx["params"][0]))
+
+
+def api_student_assignment_pdf(ctx):
+    s = current_student(ctx)
+    assignment = find(DB["assignments"], ctx["params"][0])
+    if not assignment or not assignment_visible(assignment, s):
+        raise ApiError(404, "지금은 볼 수 없는 과제예요.")
+    return assignment_pdf(assignment)
+
+
+def api_student_assignment_submit(ctx):
+    s = current_student(ctx)
+    assignment = find(DB["assignments"], ctx["params"][0])
+    if not assignment or not assignment_visible(assignment, s):
+        raise ApiError(404, "지금은 할 수 없는 과제예요.")
+    answer = req_str(ctx["body"], "answer", "답안 또는 풀이 인증", 10000)
+    previous = [x for x in DB["submissions"] if x["studentId"] == s["id"]
+                and x.get("assignmentId") == assignment["id"]]
+    if any(x["status"] == "approved" for x in previous):
+        raise ApiError(400, "이미 승인받은 과제예요.")
+    if any(x["status"] == "pending" for x in previous):
+        raise ApiError(400, "이미 인증했어요. 선생님 확인을 기다려 주세요.")
+    submission = {
+        "id": new_id("q"), "studentId": s["id"], "studentName": s["name"],
+        "assignmentId": assignment["id"], "missionId": "m_teacher", "missionName": assignment["title"],
+        "assignmentPdfName": assignment.get("pdfName", ""),
+        "missionEmoji": "📝", "note": answer, "reward": assignment["reward"], "status": "pending",
+        "createdAt": now_str(), "reviewedAt": None,
+    }
+    DB["submissions"].append(submission)
+    save_db(DB)
+    return {"ok": True, "submission": submission}
+
+
 def api_teacher_world(ctx):
     """교사용: 전체 학생들의 3D 월드 개척 및 수호동물 현황 집계"""
     return api_world_cities(ctx)
+
+
+# ─────────────────────────── 미션 ───────────────────────────
+def today_str():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def today_submissions(student_id):
+    today = today_str()
+    return [x for x in DB["submissions"] if x["studentId"] == student_id and x["createdAt"].startswith(today)
+            and not x.get("assignmentId")]
+
+
+def api_student_mission_submit(ctx):
+    """학생이 미션을 했다고 신청 → 선생님이 확인하면 보상"""
+    s = current_student(ctx)
+    body = ctx["body"]
+    m = find(DB["missions"], str(body.get("missionId", "")))
+    if not m or not m.get("active", True):
+        raise ApiError(404, "지금은 할 수 없는 미션이에요.")
+    if m.get("kind") == "assignment":
+        raise ApiError(400, "선생님이 내준 과제를 열고 답안을 인증해 주세요.")
+    prompt = m.get("prompt") or ""
+    note = req_str(body, "note", prompt or "기록", 80, required=bool(prompt))
+    if m.get("kind") == "role":
+        role = find(DB["roles"], s["roleId"]) if s.get("roleId") else None
+        if not role:
+            raise ApiError(400, "아직 맡은 역할이 없어요. 선생님께 역할을 받아 주세요.")
+        note = note or f"{role['emoji']} {role['name']}"
+    for x in today_submissions(s["id"]):
+        if x["missionId"] == m["id"] and x["status"] in ("pending", "approved"):
+            raise ApiError(400, "오늘은 이미 받은 미션이에요." if x["status"] == "approved"
+                           else "이미 신청했어요. 선생님 확인을 기다려 주세요.")
+    sub = {
+        "id": new_id("q"), "studentId": s["id"], "studentName": s["name"],
+        "missionId": m["id"], "missionName": m["name"], "missionEmoji": m.get("emoji", "🎯"),
+        "reward": int(m["reward"]), "note": note, "status": "pending",
+        "createdAt": now_str(), "reviewedAt": None,
+    }
+    DB["submissions"].append(sub)
+    save_db(DB)
+    return {"ok": True, "submission": sub}
+
+
+def mark_mission_paid(s, mission, amount, stamp):
+    """선생님이 미션 버튼으로 바로 지급할 때: 오늘 이미 받았으면 False"""
+    done = [x for x in today_submissions(s["id"]) if x["missionId"] == mission["id"]]
+    if any(x["status"] == "approved" for x in done):
+        return False
+    pending = next((x for x in done if x["status"] == "pending"), None)
+    if pending:
+        pending.update({"status": "approved", "reviewedAt": stamp, "reward": amount})
+    else:
+        DB["submissions"].append({
+            "id": new_id("q"), "studentId": s["id"], "studentName": s["name"],
+            "missionId": mission["id"], "missionName": mission["name"], "missionEmoji": mission.get("emoji", "🎯"),
+            "reward": amount, "note": "선생님 확인", "status": "approved", "createdAt": stamp, "reviewedAt": stamp,
+        })
+    return True
+
+
+def api_teacher_missions(ctx):
+    today = today_str()
+    subs = DB["submissions"]
+    approved_today = [x for x in subs if x["status"] == "approved" and (x.get("reviewedAt") or "").startswith(today)]
+    reviewed = sorted((x for x in subs if x["status"] != "pending"),
+                      key=lambda x: x.get("reviewedAt") or x["createdAt"], reverse=True)
+    return {
+        "missions": DB["missions"],
+        "pending": sorted((x for x in subs if x["status"] == "pending"), key=lambda x: x["createdAt"]),
+        "recent": reviewed[:30],
+        "today": {"approved": len(approved_today), "coins": sum(x["reward"] for x in approved_today)},
+    }
+
+
+def api_missions_review(ctx):
+    body = ctx["body"]
+    action = body.get("action")
+    if action not in ("approve", "reject"):
+        raise ApiError(400, "승인 또는 반려를 골라 주세요.")
+    ids = {str(i) for i in (body.get("ids") or [])}
+    targets = [x for x in DB["submissions"] if x["id"] in ids and x["status"] == "pending"]
+    if not targets:
+        raise ApiError(400, "처리할 미션이 없어요. 이미 처리됐을 수 있어요.")
+    stamp = now_str()
+    results = []
+    for sub in targets:
+        sub["reviewedAt"] = stamp
+        s = find(DB["students"], sub["studentId"])
+        if action == "reject" or not s:
+            sub["status"] = "rejected"
+            continue
+        if sub.get("assignmentId") and any(
+                x["studentId"] == sub["studentId"] and x.get("assignmentId") == sub["assignmentId"]
+                and x["status"] == "approved" for x in DB["submissions"]):
+            sub["status"] = "rejected"
+            continue
+        sub["status"] = "approved"
+        reason = f"미션: {sub['missionName']}" + (f" · {sub['note']}" if sub.get("note") else "")
+        results.append(pay_student(s, sub["reward"], reason, stamp))
+    save_db(DB)
+    return {"ok": True, "count": len(targets), "results": results}
+
+
+def parse_mission(body):
+    return {
+        "emoji": req_str(body, "emoji", "아이콘", 8, required=False) or "🎯",
+        "name": req_str(body, "name", "미션 이름", 20),
+        "reward": req_int(body, "reward", "보상", 1, 1000),
+        "desc": req_str(body, "desc", "설명", 60, required=False),
+        "prompt": req_str(body, "prompt", "신청할 때 적을 내용", 40, required=False),
+        "daily": bool(body.get("daily", False)),
+        "active": bool(body.get("active", True)),
+    }
+
+
+def api_mission_create(ctx):
+    m = {"id": new_id("m"), **parse_mission(ctx["body"]), "kind": "", "createdAt": now_str()}
+    DB["missions"].append(m)
+    save_db(DB)
+    return {"ok": True, "mission": m}
+
+
+def api_mission_update(ctx):
+    m = find(DB["missions"], ctx["params"][0])
+    if not m:
+        raise ApiError(404, "미션을 찾을 수 없어요.")
+    m.update(parse_mission(ctx["body"]))
+    save_db(DB)
+    return {"ok": True, "mission": m}
+
+
+def api_mission_delete(ctx):
+    m = find(DB["missions"], ctx["params"][0])
+    if not m:
+        raise ApiError(404, "미션을 찾을 수 없어요.")
+    DB["missions"].remove(m)
+    save_db(DB)
+    return {"ok": True}
+
+
+# ─────────────────────────── 자율 체육 저금통 · 학급 회의 ───────────────────────────
+def class_goal(viewer=None, teacher=False):
+    """학급 화폐 합계와 목표(학생 수 × 매일 미션 보상 합계 × 목표 일수), 학급 회의 상황"""
+    students = DB["students"]
+    per_day = sum(int(m["reward"]) for m in DB["missions"] if m.get("daily") and m.get("active", True))
+    days = int(DB["settings"].get("peGoalDays", 10))
+    goal = max(1, len(students) * per_day * days)
+    total = sum(max(0, s["balance"]) for s in students)
+    out = {
+        "total": total, "goal": goal, "perDay": per_day, "days": days, "studentCount": len(students),
+        "passRate": PE_PASS_RATE, "ready": total >= goal, "vote": None,
+        "lastEvent": DB["peEvents"][-1] if DB["peEvents"] else None,
+    }
+    v = DB.get("vote")
+    if v:
+        ids = {s["id"] for s in students}
+        votes = {k: c for k, c in v.get("votes", {}).items() if k in ids}
+        vote = {
+            "id": v["id"], "status": v["status"], "openedAt": v["openedAt"], "closedAt": v.get("closedAt"),
+            "yes": sum(1 for c in votes.values() if c == "yes"), "no": sum(1 for c in votes.values() if c == "no"),
+            "total": len(students), "result": v.get("result"),
+        }
+        if viewer:
+            vote["myVote"] = votes.get(viewer)
+        if teacher:  # 누가 무엇을 골랐는지는 보여 주지 않고(비밀 투표), 안 한 학생만 알려 줌
+            vote["notVoted"] = [s["name"] for s in sorted_students() if s["id"] not in votes]
+        out["vote"] = vote
+    return out
+
+
+def api_vote_open(ctx):
+    v = DB.get("vote")
+    if v and v["status"] == "open":
+        raise ApiError(400, "이미 학급 회의가 열려 있어요.")
+    g = class_goal()
+    if not g["ready"]:
+        raise ApiError(400, f"학급 화폐가 {g['goal'] - g['total']}만큼 더 모여야 학급 회의를 열 수 있어요.")
+    DB["vote"] = {"id": new_id("v"), "topic": "pe", "status": "open", "openedAt": now_str(),
+                  "closedAt": None, "votes": {}, "result": None}
+    save_db(DB)
+    return {"ok": True}
+
+
+def api_student_vote(ctx):
+    s = current_student(ctx)
+    choice = ctx["body"].get("choice")
+    if choice not in ("yes", "no"):
+        raise ApiError(400, "찬성 또는 반대를 골라 주세요.")
+    v = DB.get("vote")
+    if not v or v["status"] != "open":
+        raise ApiError(400, "지금은 열린 학급 회의가 없어요.")
+    v["votes"][s["id"]] = choice    # 회의가 끝나기 전까지는 마음을 바꿀 수 있음
+    save_db(DB)
+    return {"ok": True, "classGoal": class_goal(viewer=s["id"])}
+
+
+def spend_class_goal(goal, reason, stamp):
+    """목표 금액을 학생들 잔액에서 같은 비율로 사용 (잔액이 0 이하인 학생은 내지 않음)"""
+    payers = [s for s in DB["students"] if s["balance"] > 0]
+    total = sum(s["balance"] for s in payers)
+    shares = []
+    for s in payers:
+        exact = s["balance"] * goal / total
+        shares.append([s, int(exact), exact - int(exact)])
+    left = goal - sum(x[1] for x in shares)
+    for x in sorted(shares, key=lambda x: -x[2]):
+        if left <= 0:
+            break
+        if x[1] < x[0]["balance"]:
+            x[1] += 1
+            left -= 1
+    spent = 0
+    for s, pay, _ in shares:
+        if pay <= 0:
+            continue
+        s["balance"] -= pay
+        spent += pay
+        DB["transactions"].append({
+            "id": new_id("t"), "studentId": s["id"], "studentName": s["name"], "type": "class",
+            "amount": pay, "reason": reason, "balanceAfter": s["balance"], "createdAt": stamp,
+        })
+    return spent
+
+
+def api_vote_close(ctx):
+    v = DB.get("vote")
+    if not v or v["status"] != "open":
+        raise ApiError(400, "열린 학급 회의가 없어요.")
+    ids = {s["id"] for s in DB["students"]}
+    votes = {k: c for k, c in v["votes"].items() if k in ids}
+    n = len(ids)
+    yes = sum(1 for c in votes.values() if c == "yes")
+    no = sum(1 for c in votes.values() if c == "no")
+    rate = round(yes * 100 / n) if n else 0
+    passed = n > 0 and yes * 100 >= PE_PASS_RATE * n
+    result = {"yes": yes, "no": no, "total": n, "rate": rate, "passed": passed, "spent": 0}
+    stamp = now_str()
+    if passed:
+        g = class_goal()
+        if not g["ready"]:
+            raise ApiError(400, "그 사이 학급 화폐가 목표보다 줄었어요. 회의를 취소하고 조금 더 모은 뒤 다시 열어 주세요.")
+        result["spent"] = spend_class_goal(g["goal"], f"🏃 자율 체육 (학급 회의 찬성 {rate}%)", stamp)
+        DB["peEvents"].append({"id": new_id("e"), "date": stamp, "spent": result["spent"],
+                               "yes": yes, "no": no, "total": n, "rate": rate})
+    v.update({"status": "passed" if passed else "failed", "closedAt": stamp, "result": result})
+    save_db(DB)
+    return {"ok": True, "result": result}
+
+
+def api_vote_cancel(ctx):
+    v = DB.get("vote")
+    if not v or v["status"] != "open":
+        raise ApiError(400, "열린 학급 회의가 없어요.")
+    v.update({"status": "canceled", "closedAt": now_str()})
+    save_db(DB)
+    return {"ok": True}
+
+
+# ─────────────────────────── 행운의 게임 (홀짝) ───────────────────────────
+def luck_net(t):
+    return t["amount"] if t.get("win") else -t["amount"]
+
+
+def class_luck_totals():
+    """우리 반 전체가 행운의 게임으로 얻고 잃은 합계 (교육용 통계)"""
+    all_luck = [t for t in DB["transactions"] if t["type"] == "luck"]
+    return {"classPlays": len(all_luck), "classNet": sum(luck_net(t) for t in all_luck),
+            "classFees": sum(t.get("fee", 0) for t in all_luck)}
+
+
+def luck_info(s):
+    today = today_str()
+    mine = [t for t in DB["transactions"] if t["studentId"] == s["id"] and t["type"] == "luck"]
+    plays_today = sum(1 for t in mine if t["createdAt"].startswith(today))
+    wins = sum(1 for t in mine if t.get("win"))
+    return {
+        "enabled": bool(DB["settings"].get("luckEnabled", True)),
+        "bet": LUCK_BET, "fee": LUCK_FEE, "daily": LUCK_DAILY,
+        "playsToday": plays_today, "remaining": max(0, LUCK_DAILY - plays_today),
+        "plays": len(mine), "wins": wins, "losses": len(mine) - wins,
+        "fees": sum(t.get("fee", 0) for t in mine), "net": sum(luck_net(t) for t in mine),
+        **class_luck_totals(),
+    }
+
+
+def api_student_luck(ctx):
+    """홀짝: 맞히면 건 화폐의 2배를 받고 틀리면 0배. 게임마다 수수료 10%는 사라진다."""
+    s = current_student(ctx)
+    if not DB["settings"].get("luckEnabled", True):
+        raise ApiError(400, "선생님이 지금은 행운의 게임을 쉬게 했어요.")
+    pick = ctx["body"].get("pick")
+    if pick not in ("odd", "even"):
+        raise ApiError(400, "홀 또는 짝을 골라 주세요.")
+    if luck_info(s)["remaining"] <= 0:
+        raise ApiError(400, f"행운의 게임은 하루 {LUCK_DAILY}번까지만 할 수 있어요. 내일 다시 만나요!")
+    cost = LUCK_BET + LUCK_FEE
+    cur = DB["settings"]["currencyName"]
+    if s["balance"] < cost:
+        raise ApiError(400, f"{cur}이(가) 부족해요. 한 번 하려면 {cost} {cur}(걸기 {LUCK_BET} + 수수료 {LUCK_FEE})이 필요해요.")
+    marbles = secrets.randbelow(10) + 1          # 구슬 1~10개: 홀·짝이 반반
+    win = (marbles % 2 == 1) == (pick == "odd")
+    net = (LUCK_BET if win else -LUCK_BET) - LUCK_FEE
+    s["balance"] += net
+    DB["transactions"].append({
+        "id": new_id("t"), "studentId": s["id"], "studentName": s["name"], "type": "luck",
+        "amount": abs(net), "win": win, "bet": LUCK_BET, "fee": LUCK_FEE, "pick": pick, "marbles": marbles,
+        "reason": f"🍀 행운의 게임 · {'홀' if pick == 'odd' else '짝'} → 구슬 {marbles}개 ({'맞힘' if win else '틀림'})",
+        "balanceAfter": s["balance"], "createdAt": now_str(),
+    })
+    save_db(DB)
+    return {"ok": True, "result": {"marbles": marbles, "pick": pick, "win": win, "bet": LUCK_BET,
+                                   "fee": LUCK_FEE, "net": net},
+            "student": student_view(s), "luck": luck_info(s)}
 
 
 # (메서드, 경로 정규식, 함수, 필요한 권한)
@@ -1023,7 +1724,27 @@ ROUTES = [
     ("GET", r"/api/student/shop", api_student_shop, "student"),
     ("POST", r"/api/student/buy", api_student_buy, "student"),
     ("POST", r"/api/student/claim-city", api_student_claim_city, "student"),
+    ("POST", r"/api/student/taxes", api_student_tax, "student"),
+    ("POST", r"/api/student/upgrade-character", api_student_upgrade_character, "student"),
+    ("POST", r"/api/student/expand-territory", api_student_expand_territory, "student"),
+    ("GET", r"/api/student/assignments/([\w-]+)/pdf", api_student_assignment_pdf, "student"),
+    ("POST", r"/api/student/assignments/([\w-]+)/submit", api_student_assignment_submit, "student"),
     ("PUT", r"/api/student/animal", api_student_update_animal, "student"),
+    ("POST", r"/api/student/missions", api_student_mission_submit, "student"),
+    ("POST", r"/api/student/vote", api_student_vote, "student"),
+    ("POST", r"/api/student/luck", api_student_luck, "student"),
+    ("GET", r"/api/teacher/missions", api_teacher_missions, "teacher"),
+    ("GET", r"/api/teacher/assignments", api_teacher_assignments, "teacher"),
+    ("POST", r"/api/teacher/assignments", api_teacher_assignment_create, "teacher"),
+    ("DELETE", r"/api/teacher/assignments/([\w-]+)", api_teacher_assignment_delete, "teacher"),
+    ("GET", r"/api/teacher/assignments/([\w-]+)/pdf", api_teacher_assignment_pdf, "teacher"),
+    ("POST", r"/api/teacher/missions", api_mission_create, "teacher"),
+    ("POST", r"/api/teacher/missions/review", api_missions_review, "teacher"),
+    ("PUT", r"/api/teacher/missions/([\w-]+)", api_mission_update, "teacher"),
+    ("DELETE", r"/api/teacher/missions/([\w-]+)", api_mission_delete, "teacher"),
+    ("POST", r"/api/teacher/vote/open", api_vote_open, "teacher"),
+    ("POST", r"/api/teacher/vote/close", api_vote_close, "teacher"),
+    ("POST", r"/api/teacher/vote/cancel", api_vote_cancel, "teacher"),
     ("GET", r"/api/teacher/state", api_teacher_state, "teacher"),
     ("GET", r"/api/teacher/transactions", api_teacher_transactions, "teacher"),
     ("GET", r"/api/teacher/world", api_teacher_world, "teacher"),
@@ -1159,7 +1880,7 @@ def main():
         pass
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("=" * 56)
-    print("  🪙 학급경제 게임 서버가 켜졌어요!")
+    print("  🪙 서초롱 민주시민 경제교육 서버가 켜졌어요!")
     print("=" * 56)
     print(f"  선생님 PC에서:   http://localhost:{PORT}")
     for ip in local_ips():

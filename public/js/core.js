@@ -53,48 +53,51 @@ export const session = {
 
 import { handleMockAPI } from './mock-storage.js';
 
-let isMockMode = null; // null: unknown, true: mock, false: server
+let isMockMode = null; // null: 아직 모름, true: 브라우저 저장소(체험 모드), false: 교실 서버
+let modeProbe = null;
+// 서버가 없는 정적 호스팅 주소는 확인 없이 바로 체험 모드
+const STATIC_HOSTS = /(\.github\.io|\.vercel\.app|\.netlify\.app|\.pages\.dev)$/i;
 
 export function getAppMode() {
   return isMockMode ? 'mock' : 'server';
 }
 
+/** 처음 한 번만 교실 서버가 있는지 확인한다. 한 번 정한 모드는 바꾸지 않는다. */
+function detectMode() {
+  if (isMockMode !== null) return Promise.resolve(isMockMode);
+  if (location.protocol === 'file:' || STATIC_HOSTS.test(location.hostname)) {
+    isMockMode = true;
+    return Promise.resolve(true);
+  }
+  if (!modeProbe) {
+    modeProbe = fetch('/api/public/info', { headers: { Accept: 'application/json' } })
+      .then((r) => {
+        // 404나 index.html 같은 응답이면 서버가 없는 정적 호스팅
+        isMockMode = !(r.ok && (r.headers.get('content-type') || '').includes('application/json'));
+      })
+      .catch(() => { isMockMode = true; })
+      .then(() => {
+        if (isMockMode) console.info('Classimal World: 교실 서버가 없어 체험 모드(이 브라우저에만 저장)로 작동합니다.');
+      });
+  }
+  return modeProbe.then(() => isMockMode);
+}
+
 // ---------- 서버 통신 ----------
 export async function api(path, { method = 'GET', body } = {}) {
   const s = session.get();
-
-  // 1. 호스팅 환경 감지: Vercel, GitHub Pages, Netlify 등 온라인 웹 환경에서는 즉시 브라우저 로컬 저장소 모드 사용
-  if (isMockMode === null) {
-    const host = location.hostname.toLowerCase();
-    const isLocalServer = host === 'localhost' || host === '127.0.0.1' || host.startsWith('192.168.') || host.startsWith('10.');
-    if (!isLocalServer || location.protocol === 'file:') {
-      isMockMode = true;
-      console.log(`Classimal World: 웹 호스팅(${host}) 감지 -> 브라우저 로컬 저장소 모드로 작동합니다.`);
-    }
-  }
-
-  if (isMockMode === true) {
+  if (await detectMode()) {
     return await handleMockAPI(path, { method, body, token: s?.token });
   }
 
-  // 2. 로컬 서버 연결 시도
   const headers = { 'Content-Type': 'application/json' };
   if (s?.token) headers.Authorization = `Bearer ${s.token}`;
   let res;
   try {
     res = await fetch(`/api${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
   } catch {
-    // 백엔드 서버가 켜져 있지 않은 경우 자동으로 브라우저 로컬 모드로 전환
-    console.warn(`Classimal World: 백엔드 서버 연결 불가. 브라우저 로컬 저장소 모드로 전환합니다.`);
-    isMockMode = true;
-    return await handleMockAPI(path, { method, body, token: s?.token });
-  }
-
-  // 3. API 경로가 없는 정적 호스팅(404)일 경우 로컬 모드로 즉시 전환
-  if (res.status === 404) {
-    console.warn(`Classimal World: API 라우트 없음(404). 브라우저 로컬 저장소 모드로 전환합니다.`);
-    isMockMode = true;
-    return await handleMockAPI(path, { method, body, token: s?.token });
+    // 서버 모드에서 연결이 끊겨도 체험 모드로 바꾸지 않는다 (기록이 서버와 브라우저로 나뉘지 않게)
+    throw new Error('교실 서버에 연결할 수 없어요. 와이파이와 서버 창이 켜져 있는지 확인해 주세요.');
   }
 
   let data = null;
@@ -105,15 +108,7 @@ export async function api(path, { method = 'GET', body } = {}) {
     location.hash = '#/';
     throw new Error(data?.error || '다시 들어와 주세요.');
   }
-  if (!res.ok) {
-    if (res.status >= 500) {
-      isMockMode = true;
-      return await handleMockAPI(path, { method, body, token: s?.token });
-    }
-    throw new Error(data?.error || '오류가 발생했어요.');
-  }
-
-  isMockMode = false;
+  if (!res.ok) throw new Error(data?.error || '오류가 발생했어요.');
   return data;
 }
 
@@ -134,7 +129,7 @@ export function toast(msg, type = 'success') {
 }
 
 // ---------- 모달 ----------
-export function openModal({ title, body, foot = '', wide = false, onMount }) {
+export function openModal({ title, body, foot = '', wide = false, onMount, onClose }) {
   const root = $('#modal-root');
   const wrap = document.createElement('div');
   wrap.className = 'modal-backdrop';
@@ -149,13 +144,63 @@ export function openModal({ title, body, foot = '', wide = false, onMount }) {
     </div>`;
   root.appendChild(wrap);
   const onKey = (e) => { if (e.key === 'Escape') close(); };
-  function close() { document.removeEventListener('keydown', onKey); wrap.remove(); }
+  let closed = false;
+  const observer = new MutationObserver(() => { if (!wrap.isConnected) close(); });
+  observer.observe(root, { childList: true });
+  function close() {
+    if (closed) return;
+    closed = true;
+    observer.disconnect();
+    document.removeEventListener('keydown', onKey);
+    wrap.remove();
+    onClose?.();
+  }
   wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) close(); });
   $('#modal-close', wrap).addEventListener('click', close);
   document.addEventListener('keydown', onKey);
   const modal = { el: wrap, close };
   onMount?.(modal);
   return modal;
+}
+
+// ---------- PDF 과제 ----------
+const MAX_PDF_BYTES = 5 * 1024 * 1024;
+export async function readPdfFile(file) {
+  if (!file) return { pdfName: '', pdfData: '' };
+  if (!/\.pdf$/i.test(file.name)) throw new Error('PDF 파일을 선택해 주세요.');
+  if (file.size > MAX_PDF_BYTES) throw new Error('PDF는 5MB까지 올릴 수 있어요.');
+  const signature = new TextDecoder().decode(await file.slice(0, 5).arrayBuffer());
+  if (signature !== '%PDF-') throw new Error('올바른 PDF 파일인지 확인해 주세요.');
+  const data = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('파일을 읽지 못했어요. 다시 선택해 주세요.'));
+    reader.readAsDataURL(file);
+  });
+  return { pdfName: file.name, pdfData: `data:application/pdf;base64,${data.split(',')[1]}` };
+}
+
+export async function getAssignmentPdfUrl(assignment, role = 'student') {
+  const data = await api(`/${role}/assignments/${encodeURIComponent(assignment.id)}/pdf`);
+  const match = /^data:application\/pdf;base64,([A-Za-z0-9+/=]+)$/.exec(data.pdfData || '');
+  if (!match) throw new Error('과제 PDF를 불러올 수 없어요.');
+  const decoded = atob(match[1]);
+  if (!decoded.startsWith('%PDF-') || decoded.length > MAX_PDF_BYTES) throw new Error('올바른 PDF 파일이 아니에요.');
+  const bytes = Uint8Array.from(decoded, (c) => c.charCodeAt(0));
+  return URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+}
+
+export async function openAssignmentPdf(assignment, { role = 'student' } = {}) {
+  let url = null;
+  try {
+    url = await getAssignmentPdfUrl(assignment, role);
+    return openModal({
+      title: `📄 ${esc(assignment.title || assignment.pdfName || '과제 PDF')}`,
+      wide: true,
+      body: `<div class="row"><a class="btn btn-ghost btn-sm" href="${url}" target="_blank" rel="noopener">새 창에서 보기</a><a class="btn btn-ghost btn-sm" href="${url}" download="${esc(assignment.pdfName || '과제.pdf')}">PDF 내려받기</a></div><iframe class="pdf-frame" title="과제 PDF" src="${url}"></iframe>`,
+      onClose: () => URL.revokeObjectURL(url),
+    });
+  } catch (e) { if (url) URL.revokeObjectURL(url); toast(e.message, 'error'); return null; }
 }
 
 export function confirmModal({ emoji = '❓', title = '확인', html = '', okText = '확인', okClass = 'btn-primary' }) {

@@ -1,0 +1,48 @@
+/* 서초롱: 교사 과제 · 세금 · 캐릭터 성장 */
+.topbar-inner { height: auto; min-height: 68px; padding: 12px 0; flex-wrap: wrap; }
+.brand { font-size: clamp(17px, 2vw, 21px); white-space: normal; }
+.brand > div { line-height: 1.35; }
+.nav { order: 3; width: 100%; margin-left: 0; flex-shrink: 0; }
+.user-chip { margin-left: auto; }
+.assignment-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 18px; }
+.grid-2 > *, .grid-3 > *, .student-hero > * { min-width: 0; }
+.tx-main, .role-banner > div, .task-text { min-width: 0; overflow-wrap: anywhere; }
+.assignment-card { padding: 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.assignment-card.off { opacity: .72; }
+.assignment-card h3 { font-size: 18px; overflow-wrap: anywhere; }
+.assignment-instructions, .assignment-answer { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.75; }
+.assignment-instructions { color: var(--muted); }
+.assignment-answer { max-height: 48vh; overflow-y: auto; }
+textarea.assignment-answer { min-height: 150px; width: 100%; max-height: none; }
+.economy-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; }
+.economy-row > .card { display: flex; flex-direction: column; gap: 8px; }
+.growth-card .card-title { font-size: 21px; }
+.growth-card p { font-size: 14px; line-height: 1.7; }
+.character-growth { display: flex; align-items: center; gap: 18px; margin: 10px 0 14px; }
+.character-growth > span { font-size: 40px; transform: scale(var(--character-scale, 1)); transform-origin: center; margin: 6px 10px; transition: transform .3s ease; }
+.character-growth small { display: block; color: var(--muted); margin-top: 3px; }
+.pdf-frame { width: 100%; height: min(52vh, 600px); min-height: 260px; border: 1px solid var(--border); border-radius: 10px; background: #fff; flex-shrink: 0; }
+.modal.wide { width: min(940px, 100%); }
+.modal-body { min-height: 0; }
+#teacher-assignments { scroll-margin-top: 155px; }
+#assignment-students .chips { display: flex; flex-wrap: wrap; gap: 10px; }
+#assignment-pdf { height: auto; padding: 12px; }
+.tx-icon.tax { background: rgba(56,189,248,.14); }
+.tx-icon.upgrade { background: rgba(244,114,182,.14); }
+.tx-icon.territory { background: rgba(45,212,191,.14); }
+.banner-info { display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; padding: 16px 18px; border-radius: var(--radius); border: 1px solid rgba(56,189,248,.3); background: rgba(56,189,248,.08); margin-bottom: 18px; }
+@media (max-width: 700px) {
+  .grid-2, .grid-3, .student-hero { grid-template-columns: minmax(0, 1fr); }
+  .assignment-grid, .economy-row { grid-template-columns: minmax(0, 1fr); }
+  .brand { max-width: 62%; gap: 6px; }
+  .brand-logo { width: 30px; height: 30px; font-size: 22px; }
+  .user-chip { gap: 5px; }
+  .user-chip .avatar, .user-chip .animal-avatar-badge { display: none; }
+  .user-chip .user-name { max-width: 68px; font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+  .review-row { flex-wrap: wrap; }
+  .review-main { min-width: 170px; }
+  .pdf-frame { min-height: 220px; height: 42vh; }
+  .modal-foot { flex-wrap: wrap; }
+  .economy-actions .btn { white-space: normal; }
+  #teacher-assignments { scroll-margin-top: 145px; }
+}

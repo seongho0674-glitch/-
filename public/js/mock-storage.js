@@ -1,4 +1,6 @@
 // ==========================================================
+
+import { CLASS_ROSTER } from './class-roster.js';
 // Classimal World & 학급경제 - 브라우저 독립 저장소 (Local Mock DB)
 // - GitHub Pages, 정적 웹 호스팅, 오프라인 환경에서도 백엔드 없이 100% 정상 작동
 // ==========================================================
@@ -61,100 +63,205 @@ function uid(p = 'id') {
   return `${p}_${Math.random().toString(36).substring(2, 10)}`;
 }
 
+// 서버(server.py)처럼 이 컴퓨터 시각으로 기록한다 (UTC로 적으면 화면 시각이 9시간 어긋나고 '오늘'이 아침 9시에 바뀜)
 function nowStr() {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, '');
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+const todayStr = () => nowStr().slice(0, 10);
+
+// ---------- 미션 · 학급 회의 · 행운의 게임 규칙 (server.py와 같은 값) ----------
+const MISSIONS_SEED = [
+  ['m_teacher', '📝', '선생님 과제', 10, '선생님이 배부한 학습지나 과제를 풀고 인증해요', false, '답안을 적고 인증해요', 'assignment'],
+  ['m_role', '🧩', '1인 1역', 10, '내가 맡은 역할을 끝까지 해냈어요', true, '', 'role'],
+  ['m_pypx_archive', '🗂️', 'PYPX 아카이빙', 30, 'PYPX 탐구 과정을 사진·글로 기록하고 정리했어요', false, '무엇을 기록·정리했나요?', ''],
+  ['m_pypx_solve', '💡', 'PYPX 탐구 해결', 40, '탐구 질문을 해결하고 알게 된 점을 나눴어요', false, '어떤 탐구 질문을 해결했나요?', ''],
+  ['m_reading', '📖', '독서노트', 10, '책을 읽고 독서노트를 썼어요', false, '읽은 책 제목', ''],
+  ['m_notice', '📒', '알림장', 5, '오늘 알림장을 빠짐없이 적었어요', true, '', ''],
+  ['m_supplies', '🎒', '준비물 챙겨오기', 5, '오늘 필요한 준비물을 챙겨 왔어요', true, '', ''],
+  ['m_pyp_reading', '🔎', 'PYP 관련 독서 인증', 15, '탐구 주제와 관련된 책을 읽고 인증했어요', false, '책 제목과 관련된 탐구 주제', ''],
+];
+const SEAT_DESC = '원하는 친구와 하루 동안 자리를 바꿔요. 가장 귀한 교환권!';
+const ITEM_PRICE_UPDATE = {
+  '자리 바꾸기 쿠폰': [50, 150], '일일 선생님 쿠폰': [120, 120], '숙제 하루 면제 쿠폰': [80, 100], '급식 먼저 먹기 쿠폰': [40, 60],
+  '음악 들으며 공부 쿠폰': [30, 40], '미니 노트': [25, 30], '캐릭터 연필': [20, 25], '간식 뽑기': [15, 20],
+};
+const LUCK_BET = 10;     // 기본 미션 1개 보상만큼
+const LUCK_FEE = 1;      // 수수료 10%
+const LUCK_DAILY = 5;    // 하루 횟수
+const PE_PASS_RATE = 70; // 학급 회의 통과 기준 (%)
+
+function seedMissions() {
+  return MISSIONS_SEED.map(([id, emoji, name, reward, desc, daily, prompt, kind]) => (
+    { id, emoji, name, reward, desc, daily, prompt, kind, active: true, createdAt: nowStr() }));
+}
+
+/** 예전 체험 데이터에 새 기능 칸을 채우고 기본 상품 가격을 한 번 정리 (server.py migrate_db와 같음) */
+function migrateDB(db) {
+  let changed = false;
+  db.settings = db.settings || {};
+  if (!('luckEnabled' in db.settings)) { db.settings.luckEnabled = true; changed = true; }
+  if (!('peGoalDays' in db.settings)) { db.settings.peGoalDays = 10; changed = true; }
+  if (!Array.isArray(db.missions)) { db.missions = seedMissions(); changed = true; }
+  for (const k of ['submissions', 'peEvents', 'transactions', 'assignments']) if (!Array.isArray(db[k])) { db[k] = []; changed = true; }
+  if (!('vote' in db)) { db.vote = null; changed = true; }
+  if (Number(db.version || 1) < 2) {
+    for (const it of db.items || []) {
+      const upd = ITEM_PRICE_UPDATE[it.name];
+      if (upd && Number(it.price) === upd[0]) {
+        it.price = upd[1];
+        if (it.name === '자리 바꾸기 쿠폰') { it.name = '자리 바꾸기 교환권'; it.description = SEAT_DESC; }
+      }
+    }
+    for (const t of db.transactions) if (t.type === 'pay') t.type = 'give'; // 예전 체험 데이터의 잘못된 종류
+    db.version = 2;
+    changed = true;
+  }
+  if (Number(db.version || 1) < 3) {
+    for (const it of db.items || []) {
+      if (it.name === '캐릭터 연필') Object.assign(it, { name: '학용품', type: 'goods', price: 200, description: '학급 상점에서 학용품을 골라요.' });
+      if (['미니 노트', '미니노트'].includes(it.name)) Object.assign(it, { name: '알림장 면제', type: 'coupon', price: 100, description: '알림장 한 번을 면제받아요. (선생님 확인 필요)' });
+      if (it.name === '간식 뽑기') it.price = 50;
+    }
+    if (!db.missions.some(m => m.id === 'm_teacher')) db.missions.push(seedMissions().find(m => m.id === 'm_teacher'));
+    db.version = 3;
+    changed = true;
+  }
+  for (const s of db.students || []) {
+    if (!('characterLevel' in s)) { s.characterLevel = 1; changed = true; }
+    if (!('territoryPurchases' in s)) { s.territoryPurchases = 0; changed = true; }
+    if (!s.claimedCityTiles || typeof s.claimedCityTiles !== 'object' || Array.isArray(s.claimedCityTiles)) {
+      const home = s.homeCity || 'seoul';
+      const otherCities = [...new Set(s.claimedCities || [home])].filter(id => id !== home);
+      s.claimedCityTiles = { [home]: Math.max(1, Number(s.claimedTiles ?? 6) - otherCities.length * 3) };
+      for (const id of otherCities) s.claimedCityTiles[id] = 3;
+      changed = true;
+    }
+  }
+  if (Number(db.settings.rosterVersion || 0) < 1) {
+    migrateRoster(db);
+    db.settings.rosterVersion = 1;
+    changed = true;
+  }
+  return changed;
+}
+
+function makeRosterStudent(entry, idx) {
+  const p = ANIMALS_PRESETS[idx % ANIMALS_PRESETS.length];
+  const city = CITIES_DATA[idx % CITIES_DATA.length];
+  return {
+    id: `s_${entry.number}`, number: entry.number, name: entry.name, pin: '1234',
+    balance: 100, exp: 150, characterLevel: 1, territoryPurchases: 0,
+    roleId: entry.roleId, createdAt: nowStr(),
+    animal: { name: p.name, species: p.species, emoji: p.emoji, title: p.title },
+    homeCity: city.id, claimedCities: [city.id], claimedTiles: 6, claimedCityTiles: { [city.id]: 6 }, energy: 3, friends: [...p.friends],
+  };
+}
+
+function migrateRoster(db) {
+  const matched = new Set();
+  const renamed = new Map();
+  CLASS_ROSTER.students.forEach((entry, idx) => {
+    let s = db.students.find(s => !matched.has(s.id) && s.name === entry.name);
+    if (!s) s = db.students.find(s => !matched.has(s.id) && Number(s.number) === entry.number && /^\d+번 학생$/.test(s.name || ''));
+    if (!s) {
+      s = makeRosterStudent(entry, idx);
+      if (db.students.some(old => old.id === s.id)) s.id = uid('s');
+      db.students.push(s);
+    }
+    Object.assign(s, { number: entry.number, name: entry.name, roleId: entry.roleId });
+    matched.add(s.id);
+    renamed.set(s.id, s.name);
+  });
+  const referenced = new Set([
+    ...db.transactions.map(t => t.studentId), ...db.submissions.map(q => q.studentId),
+    ...db.assignments.flatMap(a => a.studentIds || []), ...Object.keys(db.vote?.votes || {}),
+  ]);
+  db.students = db.students.filter(s => matched.has(s.id) || !(
+    /^\d+번 학생$/.test(s.name || '') && !referenced.has(s.id) &&
+    ((Number(s.balance || 0) === 100 && Number(s.exp || 0) === 150) || (Number(s.balance || 0) === 0 && Number(s.exp || 0) === 0)) &&
+    (s.claimedCities?.length || 1) === 1 && Number(s.claimedTiles ?? 6) === 6 &&
+    Number(s.characterLevel || 1) === 1 && Number(s.territoryPurchases || 0) === 0
+  ));
+  for (const records of [db.transactions, db.submissions]) for (const record of records) {
+    if (renamed.has(record.studentId)) record.studentName = renamed.get(record.studentId);
+  }
+  for (const role of CLASS_ROSTER.roles) {
+    const current = db.roles.find(r => r.id === role.id);
+    const fields = { ...role, tasks: [...role.tasks], createdAt: current?.createdAt || nowStr() };
+    if (current) Object.assign(current, fields);
+    else db.roles.push(fields);
+  }
+  const originalRoleNames = new Set(['칠판 지킴이', '전등 관리자', '창문 관리자', '학급 문고 사서', '분리수거 대장', '식물 돌보미', '우체부', '급식 도우미', '일정 알리미', '청소 반장', 'IT 도우미', '학급 은행원']);
+  const usedRoleIds = new Set(db.students.map(s => s.roleId));
+  db.roles = db.roles.filter(r => !originalRoleNames.has(r.name) || usedRoleIds.has(r.id));
 }
 
 export function createDefaultDB() {
-  const roles = [
-    { id: uid("r"), emoji: "🧽", name: "칠판 지킴이", tasks: ["쉬는 시간마다 칠판 지우기", "분필·보드마커 정리하기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "💡", name: "전등 관리자", tasks: ["이동 수업 때 전등 끄기", "아침에 전등 켜기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "🪟", name: "창문 관리자", tasks: ["아침에 창문 열어 환기하기", "하교 전 창문 닫기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "📚", name: "학급 문고 사서", tasks: ["학급 문고 책 정리하기", "빌린 책 기록 확인하기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "🗑️", name: "분리수거 대장", tasks: ["분리수거함 정리하기", "금요일에 분리수거 버리기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "🪴", name: "식물 돌보미", tasks: ["화분에 물 주기 (월·수·금)", "시든 잎 정리하기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "📮", name: "우체부", tasks: ["가정통신문 나눠 주기", "제출물 걷어서 선생님께 드리기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "🍚", name: "급식 도우미", tasks: ["급식 전 손 씻기 안내하기", "급식 후 배식대 정리하기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "📅", name: "일정 알리미", tasks: ["칠판에 오늘 날짜·시간표 쓰기", "내일 준비물 알려 주기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "🧹", name: "청소 반장", tasks: ["청소 시간 역할 확인하기", "청소 도구 정리 확인하기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "💻", name: "IT 도우미", tasks: ["수업 전 TV·컴퓨터 켜기", "하교 전 컴퓨터 끄기"], createdAt: nowStr() },
-    { id: uid("r"), emoji: "🏦", name: "학급 은행원", tasks: ["선생님 화폐 지급 기록 돕기", "친구들 잔액 질문 안내하기"], createdAt: nowStr() }
-  ];
+  const roles = CLASS_ROSTER.roles.map(r => ({ ...r, tasks: [...r.tasks], createdAt: nowStr() }));
 
   const items = [
-    { id: uid("i"), emoji: "🪑", name: "자리 바꾸기 쿠폰", type: "coupon", price: 50, description: "원하는 친구와 하루 동안 자리를 바꿔요.", active: true, createdAt: nowStr() },
-    { id: uid("i"), emoji: "🎵", name: "음악 들으며 공부 쿠폰", type: "coupon", price: 30, description: "자습 시간에 이어폰으로 음악을 들어요.", active: true, createdAt: nowStr() },
-    { id: uid("i"), emoji: "📝", name: "숙제 하루 면제 쿠폰", type: "coupon", price: 80, description: "숙제 한 번을 면제받아요. (선생님 확인 필요)", active: true, createdAt: nowStr() },
-    { id: uid("i"), emoji: "🍽️", name: "급식 먼저 먹기 쿠폰", type: "coupon", price: 40, description: "하루 동안 급식 줄 맨 앞에 서요.", active: true, createdAt: nowStr() },
+    { id: uid("i"), emoji: "🪑", name: "자리 바꾸기 교환권", type: "coupon", price: 150, description: SEAT_DESC, active: true, createdAt: nowStr() },
     { id: uid("i"), emoji: "🧑‍🏫", name: "일일 선생님 쿠폰", type: "coupon", price: 120, description: "아침 활동 시간을 내가 진행해요.", active: true, createdAt: nowStr() },
-    { id: uid("i"), emoji: "✏️", name: "캐릭터 연필", type: "goods", price: 20, description: "귀여운 캐릭터 연필 한 자루", active: true, createdAt: nowStr() },
-    { id: uid("i"), emoji: "🍬", name: "간식 뽑기", type: "goods", price: 15, description: "간식 상자에서 한 개를 골라요.", active: true, createdAt: nowStr() },
-    { id: uid("i"), emoji: "📒", name: "미니 노트", type: "goods", price: 25, description: "손바닥만 한 귀여운 노트", active: true, createdAt: nowStr() }
+    { id: uid("i"), emoji: "📝", name: "숙제 하루 면제 쿠폰", type: "coupon", price: 100, description: "숙제 한 번을 면제받아요. (선생님 확인 필요)", active: true, createdAt: nowStr() },
+    { id: uid("i"), emoji: "🍽️", name: "급식 먼저 먹기 쿠폰", type: "coupon", price: 60, description: "하루 동안 급식 줄 맨 앞에 서요.", active: true, createdAt: nowStr() },
+    { id: uid("i"), emoji: "🎵", name: "음악 들으며 공부 쿠폰", type: "coupon", price: 40, description: "자습 시간에 이어폰으로 음악을 들어요.", active: true, createdAt: nowStr() },
+    { id: uid("i"), emoji: "📒", name: "알림장 면제", type: "coupon", price: 100, description: "알림장 한 번을 면제받아요. (선생님 확인 필요)", active: true, createdAt: nowStr() },
+    { id: uid("i"), emoji: "✏️", name: "학용품", type: "goods", price: 200, description: "학급 상점에서 학용품을 골라요.", active: true, createdAt: nowStr() },
+    { id: uid("i"), emoji: "🍬", name: "간식 뽑기", type: "goods", price: 50, description: "간식 상자에서 한 개를 골라요.", active: true, createdAt: nowStr() }
   ];
 
-  const students = Array.from({ length: 25 }, (_, idx) => {
-    const num = idx + 1;
-    const p = ANIMALS_PRESETS[idx % ANIMALS_PRESETS.length];
-    const city = CITIES_DATA[idx % CITIES_DATA.length];
-    return {
-      id: `s_${num}`,
-      number: num,
-      name: `${num}번 학생`,
-      pin: "1234",
-      balance: 100, // 웹 데모에서는 바로 체험할 수 있도록 기본 100 코인 제공
-      exp: 150,     // 2레벨 체험 기본 제공
-      roleId: roles[idx % roles.length].id,
-      createdAt: nowStr(),
-      animal: {
-        name: p.name,
-        species: p.species,
-        emoji: p.emoji,
-        title: p.title
-      },
-      homeCity: city.id,
-      claimedCities: [city.id],
-      claimedTiles: 6,
-      energy: 3,
-      friends: p.friends
-    };
-  });
+  const students = CLASS_ROSTER.students.map(makeRosterStudent);
 
   return {
-    version: 1,
+    version: 3,
     settings: {
       className: "6학년 1반",
       currencyName: "코인",
-      teacherPin: "0000"
+      teacherPin: "0000",
+      rosterVersion: 1,
+      luckEnabled: true,
+      peGoalDays: 10
     },
     students,
     roles,
     items,
     transactions: [
-      { id: uid("tx"), studentId: "s_1", studentName: "1번 학생", type: "pay", amount: 100, reason: "학급경제 첫 접속 축하 지원금", createdAt: nowStr() }
-    ]
+      { id: uid("t"), studentId: "s_1", studentName: CLASS_ROSTER.students[0].name, type: "give", amount: 100, reason: "학급경제 첫 접속 축하 지원금", balanceAfter: 100, createdAt: nowStr() }
+    ],
+    missions: seedMissions(),
+    submissions: [],
+    assignments: [],
+    vote: null,
+    peEvents: []
   };
 }
 
 export function getLocalDB() {
+  let raw;
   try {
-    const raw = localStorage.getItem(DB_KEY);
-    if (!raw) {
-      const seeded = createDefaultDB();
-      localStorage.setItem(DB_KEY, JSON.stringify(seeded));
-      return seeded;
-    }
-    return JSON.parse(raw);
+    raw = localStorage.getItem(DB_KEY);
   } catch {
+    throw new Error('브라우저 저장소를 사용할 수 없어요. 저장소 사용을 허용해 주세요.');
+  }
+  if (!raw) {
     const seeded = createDefaultDB();
+    saveLocalDB(seeded);
     return seeded;
   }
+  let db;
+  try { db = JSON.parse(raw); }
+  catch { throw new Error('저장된 학급 데이터를 읽을 수 없어요. 선생님 관리자에서 백업을 복원해 주세요.'); }
+  if (migrateDB(db)) saveLocalDB(db);
+  return db;
 }
 
 export function saveLocalDB(db) {
   try {
     localStorage.setItem(DB_KEY, JSON.stringify(db));
   } catch (e) {
-    console.error('LocalStorage 저장 실패:', e);
+    throw new Error('브라우저 저장 공간이 부족하거나 저장이 차단되어 변경 사항을 저장하지 못했어요. 작은 PDF를 사용하거나 백업 후 저장 공간을 확보해 주세요.');
   }
 }
 
@@ -175,16 +282,158 @@ export function levelInfo(exp) {
 
 export function studentView(s, includePin = false) {
   const keys = ['id', 'number', 'name', 'balance', 'exp', 'roleId',
-    'animal', 'homeCity', 'claimedCities', 'claimedTiles', 'energy', 'friends'];
+    'animal', 'homeCity', 'claimedCities', 'claimedTiles', 'claimedCityTiles', 'energy', 'friends'];
   const out = {};
   for (const k of keys) {
     if (k in s) out[k] = s[k];
   }
   Object.assign(out, levelInfo(s.exp || 0));
+  out.characterLevel = Math.max(1, Math.min(101, Math.floor(Number(s.characterLevel) || 1)));
+  out.nextUpgradeCost = out.characterLevel < 101 ? out.characterLevel * 10 : null;
+  out.territoryPurchases = Math.max(0, Math.floor(Number(s.territoryPurchases) || 0));
+  out.nextTerritoryCost = (out.territoryPurchases + 1) * 200;
   if (includePin) {
     out.pin = s.pin;
   }
   return out;
+}
+
+// ---------- 미션 · 학급 회의 · 행운의 게임 (server.py와 같은 규칙) ----------
+const sortedStudents = (db) => [...db.students].sort((a, b) => (a.number || 0) - (b.number || 0));
+const todaySubmissions = (db, sid) => db.submissions.filter(x => x.studentId === sid && (x.createdAt || '').startsWith(todayStr()));
+
+function payStudent(db, s, amount, reason, stamp) {
+  const before = levelInfo(s.exp).level;
+  s.balance = (s.balance || 0) + amount;
+  s.exp = (s.exp || 0) + amount;
+  db.transactions.push({ id: uid('t'), studentId: s.id, studentName: s.name, type: 'give', amount, reason: String(reason).slice(0, 60), balanceAfter: s.balance, createdAt: stamp });
+  const after = levelInfo(s.exp).level;
+  return { id: s.id, name: s.name, levelUp: after > before, level: after };
+}
+
+function markMissionPaid(db, s, mission, amount, stamp) {
+  const done = todaySubmissions(db, s.id).filter(x => x.missionId === mission.id);
+  if (done.some(x => x.status === 'approved')) return false;
+  const pending = done.find(x => x.status === 'pending');
+  if (pending) Object.assign(pending, { status: 'approved', reviewedAt: stamp, reward: amount });
+  else db.submissions.push({ id: uid('q'), studentId: s.id, studentName: s.name, missionId: mission.id, missionName: mission.name, missionEmoji: mission.emoji || '🎯', reward: amount, note: '선생님 확인', status: 'approved', createdAt: stamp, reviewedAt: stamp });
+  return true;
+}
+
+function classGoal(db, { viewer = null, teacher = false } = {}) {
+  const students = db.students;
+  const perDay = db.missions.filter(m => m.daily && m.active !== false).reduce((a, m) => a + Number(m.reward || 0), 0);
+  const days = Number(db.settings.peGoalDays || 10);
+  const goal = Math.max(1, students.length * perDay * days);
+  const total = students.reduce((a, s) => a + Math.max(0, s.balance || 0), 0);
+  const out = { total, goal, perDay, days, studentCount: students.length, passRate: PE_PASS_RATE, ready: total >= goal, vote: null, lastEvent: db.peEvents[db.peEvents.length - 1] || null };
+  const v = db.vote;
+  if (v) {
+    const ids = new Set(students.map(s => s.id));
+    const votes = Object.fromEntries(Object.entries(v.votes || {}).filter(([k]) => ids.has(k)));
+    const vals = Object.values(votes);
+    const vote = { id: v.id, status: v.status, openedAt: v.openedAt, closedAt: v.closedAt || null, yes: vals.filter(c => c === 'yes').length, no: vals.filter(c => c === 'no').length, total: students.length, result: v.result || null };
+    if (viewer) vote.myVote = votes[viewer] || null;
+    if (teacher) vote.notVoted = sortedStudents(db).filter(s => !(s.id in votes)).map(s => s.name);
+    out.vote = vote;
+  }
+  return out;
+}
+
+function spendClassGoal(db, goal, reason, stamp) {
+  const payers = db.students.filter(s => (s.balance || 0) > 0);
+  const total = payers.reduce((a, s) => a + s.balance, 0);
+  const shares = payers.map(s => { const exact = s.balance * goal / total; return [s, Math.floor(exact), exact - Math.floor(exact)]; });
+  let left = goal - shares.reduce((a, x) => a + x[1], 0);
+  for (const x of [...shares].sort((a, b) => b[2] - a[2])) {
+    if (left <= 0) break;
+    if (x[1] < x[0].balance) { x[1] += 1; left -= 1; }
+  }
+  let spent = 0;
+  for (const [s, pay] of shares) {
+    if (pay <= 0) continue;
+    s.balance -= pay;
+    spent += pay;
+    db.transactions.push({ id: uid('t'), studentId: s.id, studentName: s.name, type: 'class', amount: pay, reason, balanceAfter: s.balance, createdAt: stamp });
+  }
+  return spent;
+}
+
+const luckNet = (t) => (t.win ? t.amount : -t.amount);
+function classLuckTotals(db) {
+  const all = db.transactions.filter(t => t.type === 'luck');
+  return { classPlays: all.length, classNet: all.reduce((a, t) => a + luckNet(t), 0), classFees: all.reduce((a, t) => a + (t.fee || 0), 0) };
+}
+function luckInfo(db, s) {
+  const mine = db.transactions.filter(t => t.studentId === s.id && t.type === 'luck');
+  const playsToday = mine.filter(t => (t.createdAt || '').startsWith(todayStr())).length;
+  const wins = mine.filter(t => t.win).length;
+  return {
+    enabled: db.settings.luckEnabled !== false, bet: LUCK_BET, fee: LUCK_FEE, daily: LUCK_DAILY,
+    playsToday, remaining: Math.max(0, LUCK_DAILY - playsToday),
+    plays: mine.length, wins, losses: mine.length - wins,
+    fees: mine.reduce((a, t) => a + (t.fee || 0), 0), net: mine.reduce((a, t) => a + luckNet(t), 0),
+    ...classLuckTotals(db),
+  };
+}
+
+function parseMission(body) {
+  const name = String(body?.name || '').trim().slice(0, 20);
+  if (!name) throw new Error('미션 이름을(를) 입력해 주세요.');
+  const reward = Math.floor(Number(body?.reward));
+  if (!(reward >= 1 && reward <= 1000)) throw new Error('보상은(는) 1~1000 사이로 입력해 주세요.');
+  return {
+    emoji: String(body?.emoji || '🎯').slice(0, 8), name, reward,
+    desc: String(body?.desc || '').trim().slice(0, 60), prompt: String(body?.prompt || '').trim().slice(0, 40),
+    daily: !!body?.daily, active: body?.active !== false,
+  };
+}
+
+const assignmentVisible = (a, sid) => a.active !== false && (!a.studentIds?.length || a.studentIds.includes(sid));
+function assignmentView(a) {
+  const { pdfData, ...metadata } = a;
+  return { ...metadata, hasPdf: !!pdfData };
+}
+
+function parseAssignment(body, db) {
+  const title = String(body?.title || '').trim();
+  if (!title || title.length > 100) throw new Error('과제 이름은 1~100자로 입력해 주세요.');
+  const instructions = String(body?.instructions || '').trim();
+  if (instructions.length > 3000) throw new Error('과제 안내는 3000자까지 입력할 수 있어요.');
+  const reward = Number(body?.reward ?? 10);
+  if (!Number.isInteger(reward) || reward < 1 || reward > 1000) throw new Error('보상은 1~1000 사이의 정수로 입력해 주세요.');
+  if (body?.studentIds !== undefined && !Array.isArray(body.studentIds)) throw new Error('과제를 받을 학생을 다시 선택해 주세요.');
+  const studentIds = [...new Set((body?.studentIds || []).map(String))];
+  if (studentIds.some(id => !db.students.some(s => s.id === id))) throw new Error('과제를 받을 학생을 찾을 수 없어요.');
+  const pdfData = String(body?.pdfData || '');
+  const pdfName = String(body?.pdfName || '').trim().slice(0, 200);
+  if (pdfData) {
+    const prefix = 'data:application/pdf;base64,';
+    const encoded = pdfData.slice(prefix.length);
+    if (!pdfData.startsWith(prefix) || !encoded || encoded.length > Math.ceil(5 * 1024 * 1024 / 3) * 4 || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('5MB 이하의 올바른 PDF 파일을 업로드해 주세요.');
+    let decoded;
+    try { decoded = atob(encoded); }
+    catch { throw new Error('PDF 파일을 읽을 수 없어요. 파일을 다시 선택해 주세요.'); }
+    if (decoded.length > 5 * 1024 * 1024 || !decoded.startsWith('%PDF-')) throw new Error('5MB 이하의 올바른 PDF 파일을 업로드해 주세요.');
+    if (!pdfName) throw new Error('PDF 파일 이름을 입력해 주세요.');
+  }
+  return { title, instructions, reward, studentIds, pdfName: pdfData ? pdfName : '', pdfData, active: true };
+}
+
+function taxInfo(db, s) {
+  const date = todayStr();
+  const paid = type => db.transactions.some(t => t.studentId === s.id && t.type === 'tax' && t.taxType === type && (t.date || String(t.createdAt || '').slice(0, 10)) === date);
+  const incomePaid = paid('income');
+  const propertyPaid = paid('property');
+  return { date, incomePaid, propertyPaid, propertyDue: Number(s.balance || 0) > 100 && !propertyPaid };
+}
+
+function spendCoins(db, s, amount, type, reason, extra = {}) {
+  if (Number(s.balance || 0) < amount) throw new Error(`${db.settings.currencyName}이(가) ${amount - Number(s.balance || 0)}만큼 부족해요.`);
+  s.balance = Number(s.balance || 0) - amount;
+  const transaction = { id: uid('t'), studentId: s.id, studentName: s.name, type, amount, reason, balanceAfter: s.balance, createdAt: nowStr(), ...extra };
+  db.transactions.push(transaction);
+  return transaction;
 }
 
 // 모의 API 라우터
@@ -200,6 +449,8 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     }
     return null;
   };
+  if (path.startsWith('/teacher/') && token !== 't_token_teacher_master') throw new Error('선생님으로 로그인해 주세요.');
+  if (path.startsWith('/student/') && !findStudent(getSessionStudentId())) throw new Error('학생으로 다시 로그인해 주세요.');
 
   // 1. 공통 정보
   if (path === '/public/info' && method === 'GET') {
@@ -244,7 +495,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
   // 3. 학생 영역
   if (path === '/student/me' && method === 'GET') {
     const sid = getSessionStudentId();
-    const s = findStudent(sid) || db.students[0];
+    const s = findStudent(sid);
     const role = db.roles.find(r => r.id === s.roleId) || null;
     const mine = (db.transactions || []).filter(t => t.studentId === s.id);
     mine.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -257,8 +508,128 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
       student: studentView(s, false),
       role,
       transactions: mine.slice(0, 100),
-      purchases: mine.filter(t => t.type === 'buy')
+      purchases: mine.filter(t => t.type === 'buy'),
+      missions: db.missions.filter(m => m.active !== false),
+      mySubmissions: todaySubmissions(db, s.id).filter(x => !x.assignmentId),
+      assignments: db.assignments.filter(a => assignmentVisible(a, s.id)).map(assignmentView),
+      myAssignmentSubmissions: db.submissions.filter(x => x.studentId === s.id && x.assignmentId),
+      taxInfo: taxInfo(db, s),
+      classGoal: classGoal(db, { viewer: s.id }),
+      luck: luckInfo(db, s)
     };
+  }
+
+  const assignmentRoute = path.match(/^\/(student|teacher)\/assignments\/([^/]+)\/(pdf|submit)$/);
+  if (assignmentRoute) {
+    const [, role, encodedId, action] = assignmentRoute;
+    const assignment = db.assignments.find(a => a.id === decodeURIComponent(encodedId));
+    const s = role === 'student' ? findStudent(getSessionStudentId()) : null;
+    if (!assignment || (s && !assignmentVisible(assignment, s.id))) throw new Error('지금은 할 수 없는 과제예요.');
+    if (action === 'pdf' && method === 'GET') {
+      if (!assignment.pdfData) throw new Error('이 과제에는 PDF 학습지가 없어요.');
+      return { pdfName: assignment.pdfName, pdfData: assignment.pdfData };
+    }
+    if (role === 'student' && action === 'submit' && method === 'POST') {
+      const answer = String(body?.answer || '').trim();
+      if (!answer || answer.length > 10000) throw new Error('답안을 1~10000자로 적고 인증해 주세요.');
+      const duplicate = db.submissions.find(x => x.studentId === s.id && x.assignmentId === assignment.id && ['pending', 'approved'].includes(x.status));
+      if (duplicate) throw new Error(duplicate.status === 'approved' ? '이미 승인받은 과제예요.' : '이미 인증했어요. 선생님 확인을 기다려 주세요.');
+      const submission = { id: uid('q'), studentId: s.id, studentName: s.name, assignmentId: assignment.id, assignmentPdfName: assignment.pdfName || '', missionId: 'm_teacher', missionName: assignment.title, missionEmoji: '📝', note: answer, reward: assignment.reward, status: 'pending', createdAt: nowStr(), reviewedAt: null };
+      db.submissions.push(submission);
+      saveLocalDB(db);
+      return { ok: true, submission };
+    }
+  }
+
+  if (path === '/student/taxes' && method === 'POST') {
+    const s = findStudent(getSessionStudentId());
+    const type = body?.type;
+    if (!['income', 'property'].includes(type)) throw new Error('소득세 또는 재산세를 골라 주세요.');
+    const info = taxInfo(db, s);
+    if (type === 'income' ? info.incomePaid : info.propertyPaid) throw new Error('오늘은 이미 납부한 세금이에요.');
+    if (type === 'property' && Number(s.balance || 0) <= 100) throw new Error('재산세는 잔액이 100코인을 넘을 때 납부해요.');
+    const transaction = spendCoins(db, s, 10, 'tax', `${type === 'income' ? '소득세' : '재산세'} 납부`, { taxType: type, date: info.date });
+    saveLocalDB(db);
+    return { ok: true, student: studentView(s), taxInfo: taxInfo(db, s), transaction };
+  }
+
+  if (path === '/student/upgrade-character' && method === 'POST') {
+    const s = findStudent(getSessionStudentId());
+    const current = studentView(s);
+    if (current.nextUpgradeCost === null) throw new Error('캐릭터가 최고 레벨에 도달했어요!');
+    const transaction = spendCoins(db, s, current.nextUpgradeCost, 'upgrade', `캐릭터 ${current.characterLevel + 1}레벨 성장`);
+    s.characterLevel = current.characterLevel + 1;
+    saveLocalDB(db);
+    return { ok: true, student: studentView(s), transaction };
+  }
+
+  if (path === '/student/expand-territory' && method === 'POST') {
+    const s = findStudent(getSessionStudentId());
+    const current = studentView(s);
+    const transaction = spendCoins(db, s, current.nextTerritoryCost, 'territory', '영토 1칸 확장');
+    s.territoryPurchases = current.territoryPurchases + 1;
+    s.claimedTiles = Number(s.claimedTiles ?? 6) + 1;
+    const home = s.homeCity || 'seoul';
+    s.claimedCityTiles[home] = Number(s.claimedCityTiles[home] || 0) + 1;
+    saveLocalDB(db);
+    return { ok: true, student: studentView(s), transaction };
+  }
+
+  if (path === '/student/missions' && method === 'POST') {
+    const s = findStudent(getSessionStudentId());
+    if (!s) throw new Error('학생 정보를 찾을 수 없어요.');
+    const m = db.missions.find(x => x.id === String(body?.missionId || ''));
+    if (!m || m.active === false) throw new Error('지금은 할 수 없는 미션이에요.');
+    if (m.kind === 'assignment') throw new Error('선생님이 배부한 과제를 선택하고 답안을 적어 인증해 주세요.');
+    let note = String(body?.note || '').trim().slice(0, 80);
+    if (m.prompt && !note) throw new Error(`${m.prompt}을(를) 입력해 주세요.`);
+    if (m.kind === 'role') {
+      const role = db.roles.find(r => r.id === s.roleId);
+      if (!role) throw new Error('아직 맡은 역할이 없어요. 선생님께 역할을 받아 주세요.');
+      note = note || `${role.emoji} ${role.name}`;
+    }
+    const dup = todaySubmissions(db, s.id).find(x => x.missionId === m.id && ['pending', 'approved'].includes(x.status));
+    if (dup) throw new Error(dup.status === 'approved' ? '오늘은 이미 받은 미션이에요.' : '이미 신청했어요. 선생님 확인을 기다려 주세요.');
+    const sub = { id: uid('q'), studentId: s.id, studentName: s.name, missionId: m.id, missionName: m.name, missionEmoji: m.emoji || '🎯', reward: Number(m.reward), note, status: 'pending', createdAt: nowStr(), reviewedAt: null };
+    db.submissions.push(sub);
+    saveLocalDB(db);
+    return { ok: true, submission: sub };
+  }
+
+  if (path === '/student/vote' && method === 'POST') {
+    const s = findStudent(getSessionStudentId());
+    if (!s) throw new Error('학생 정보를 찾을 수 없어요.');
+    const choice = body?.choice;
+    if (!['yes', 'no'].includes(choice)) throw new Error('찬성 또는 반대를 골라 주세요.');
+    if (!db.vote || db.vote.status !== 'open') throw new Error('지금은 열린 학급 회의가 없어요.');
+    db.vote.votes = db.vote.votes || {};
+    db.vote.votes[s.id] = choice;
+    saveLocalDB(db);
+    return { ok: true, classGoal: classGoal(db, { viewer: s.id }) };
+  }
+
+  if (path === '/student/luck' && method === 'POST') {
+    const s = findStudent(getSessionStudentId());
+    if (!s) throw new Error('학생 정보를 찾을 수 없어요.');
+    if (db.settings.luckEnabled === false) throw new Error('선생님이 지금은 행운의 게임을 쉬게 했어요.');
+    const pick = body?.pick;
+    if (!['odd', 'even'].includes(pick)) throw new Error('홀 또는 짝을 골라 주세요.');
+    if (luckInfo(db, s).remaining <= 0) throw new Error(`행운의 게임은 하루 ${LUCK_DAILY}번까지만 할 수 있어요. 내일 다시 만나요!`);
+    const cost = LUCK_BET + LUCK_FEE;
+    const cur = db.settings.currencyName;
+    if ((s.balance || 0) < cost) throw new Error(`${cur}이(가) 부족해요. 한 번 하려면 ${cost} ${cur}(걸기 ${LUCK_BET} + 수수료 ${LUCK_FEE})이 필요해요.`);
+    const rnd = new Uint32Array(1);
+    crypto.getRandomValues(rnd);
+    const marbles = (rnd[0] % 10) + 1; // 구슬 1~10개: 홀·짝이 반반
+    const win = (marbles % 2 === 1) === (pick === 'odd');
+    const net = (win ? LUCK_BET : -LUCK_BET) - LUCK_FEE;
+    s.balance = (s.balance || 0) + net;
+    db.transactions.push({
+      id: uid('t'), studentId: s.id, studentName: s.name, type: 'luck', amount: Math.abs(net), win, bet: LUCK_BET, fee: LUCK_FEE, pick, marbles,
+      reason: `🍀 행운의 게임 · ${pick === 'odd' ? '홀' : '짝'} → 구슬 ${marbles}개 (${win ? '맞힘' : '틀림'})`, balanceAfter: s.balance, createdAt: nowStr()
+    });
+    saveLocalDB(db);
+    return { ok: true, result: { marbles, pick, win, bet: LUCK_BET, fee: LUCK_FEE, net }, student: studentView(s), luck: luckInfo(db, s) };
   }
 
   if (path === '/student/shop' && method === 'GET') {
@@ -296,58 +667,196 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     return { ok: true, balance: s.balance, transaction: tx };
   }
 
+  // server.py의 api_world_cities와 같은 모양: 도시마다 사는 학생(residents)과 영토 칸 수
+  const worldCities = () => {
+    const cityMap = new Map(CITIES_DATA.map(c => [c.id, { ...c, residents: [], totalTiles: 0 }]));
+    for (const s of db.students) {
+      const home = s.homeCity || 'seoul';
+      const claimed = Array.isArray(s.claimedCities) ? s.claimedCities : [home];
+      const tiles = s.claimedTiles ?? 6;
+      const animal = s.animal || { name: '모리', species: '여우', emoji: '🦊', title: '숲의 수호자' };
+      const level = levelInfo(s.exp || 0).level;
+      for (const cid of claimed) {
+        const city = cityMap.get(cid);
+        if (!city) continue;
+        const isHome = cid === home;
+        const cityTiles = Number(s.claimedCityTiles?.[cid] ?? (isHome ? tiles : 3));
+        city.residents.push({ id: s.id, number: s.number, name: s.name, level, characterLevel: studentView(s).characterLevel, animal, isHome, tiles: cityTiles });
+        city.totalTiles += cityTiles;
+      }
+    }
+    return { cities: [...cityMap.values()], currencyName: db.settings.currencyName };
+  };
+
   if (path === '/world/cities' && method === 'GET') {
-    const cities = CITIES_DATA.map(c => {
-      const owner = db.students.find(s => (s.claimedCities || []).includes(c.id));
-      return {
-        ...c,
-        ownerStudentId: owner ? owner.id : null,
-        ownerStudentNumber: owner ? owner.number : null,
-        ownerStudentName: owner ? owner.name : null,
-        animalName: owner?.animal?.name || null,
-        animalEmoji: owner?.animal?.emoji || null,
-        animalTitle: owner?.animal?.title || null
-      };
-    });
-    return { cities };
+    return worldCities();
   }
 
   if (path === '/student/claim-city' && method === 'POST') {
-    const sid = getSessionStudentId();
-    const s = findStudent(sid);
+    const s = findStudent(getSessionStudentId());
     if (!s) throw new Error('학생 정보를 찾을 수 없어요.');
-    const { cityId, animalName, animalEmoji } = body || {};
-    if (!s.claimedCities) s.claimedCities = [];
-    if (!s.claimedCities.includes(cityId)) {
-      s.claimedCities.push(cityId);
+    const cityId = String(body?.cityId || '');
+    const city = CITIES_DATA.find(c => c.id === cityId);
+    if (!city) throw new Error('존재하지 않는 도시예요.');
+    if (!Array.isArray(s.claimedCities)) s.claimedCities = [s.homeCity || 'seoul'];
+    if (s.claimedCities.includes(cityId)) throw new Error('이미 개척한 도시예요!');
+    const COST = studentView(s).nextTerritoryCost;
+    const cur = db.settings.currencyName;
+    if ((s.balance || 0) < COST) {
+      throw new Error(`새 도시를 개척하려면 ${cur}이(가) ${COST - (s.balance || 0)}만큼 더 필요해요. (필요: ${COST} ${cur})`);
     }
-    if (animalName && s.animal) s.animal.name = animalName;
-    if (animalEmoji && s.animal) s.animal.emoji = animalEmoji;
+    s.balance -= COST;
+    s.claimedCities.push(cityId);
+    s.claimedTiles = (s.claimedTiles ?? 6) + 1;
+    s.territoryPurchases = studentView(s).territoryPurchases + 1;
+    s.claimedCityTiles[cityId] = 1;
+    s.energy = Math.max(0, (s.energy ?? 2) - 1);
+    if (!db.transactions) db.transactions = [];
+    db.transactions.push({
+      id: uid('t'), studentId: s.id, studentName: s.name, type: 'territory', cityId, amount: COST,
+      reason: `3D 월드 탐험: ${city.name} 영토 개척`, balanceAfter: s.balance, createdAt: nowStr()
+    });
     saveLocalDB(db);
-    return { ok: true, student: studentView(s) };
+    return { ok: true, message: `축하해요! ${city.name}에 내 깃발을 꽂았어요! 🚩`, city, student: studentView(s) };
   }
 
   // 4. 교사 영역
-  if (path === '/teacher/state' && method === 'GET') {
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const txs = db.transactions || [];
-    const given = txs.filter(t => t.type === 'give' && (t.createdAt || '').startsWith(todayStr)).reduce((a, t) => a + (t.amount || 0), 0);
-    const taken = txs.filter(t => t.type === 'take' && (t.createdAt || '').startsWith(todayStr)).reduce((a, t) => a + (t.amount || 0), 0);
-    const purchases = txs.filter(t => t.type === 'buy' && (t.createdAt || '').startsWith(todayStr)).length;
+  if (path === '/teacher/assignments' && method === 'GET') return { assignments: db.assignments.map(assignmentView) };
 
-    const sortedStudents = [...db.students].sort((a, b) => (a.number || 0) - (b.number || 0));
+  if (path === '/teacher/assignments' && method === 'POST') {
+    const assignment = { id: uid('a'), ...parseAssignment(body, db), createdAt: nowStr() };
+    db.assignments.push(assignment);
+    saveLocalDB(db);
+    return { ok: true, assignment: assignmentView(assignment) };
+  }
+
+  if (/^\/teacher\/assignments\/[^/]+$/.test(path) && method === 'DELETE') {
+    const assignment = db.assignments.find(a => a.id === decodeURIComponent(path.slice('/teacher/assignments/'.length)));
+    if (!assignment) throw new Error('과제를 찾을 수 없어요.');
+    assignment.active = false;
+    saveLocalDB(db);
+    return { ok: true, assignment: assignmentView(assignment) };
+  }
+
+  if (path === '/teacher/state' && method === 'GET') {
+    const today = todayStr();
+    const txs = db.transactions || [];
+    const todays = txs.filter(t => (t.createdAt || '').startsWith(today));
+    const given = todays.filter(t => t.type === 'give').reduce((a, t) => a + (t.amount || 0), 0);
+    const taken = todays.filter(t => t.type === 'take').reduce((a, t) => a + (t.amount || 0), 0);
+    const purchases = todays.filter(t => t.type === 'buy').length;
+    const luckToday = todays.filter(t => t.type === 'luck');
 
     return {
       settings: {
         className: db.settings.className,
         currencyName: db.settings.currencyName,
-        defaultPin: db.settings.teacherPin === '0000'
+        defaultPin: db.settings.teacherPin === '0000',
+        luckEnabled: db.settings.luckEnabled !== false,
+        peGoalDays: Number(db.settings.peGoalDays || 10)
       },
-      students: sortedStudents.map(s => studentView(s, true)),
+      students: sortedStudents(db).map(s => studentView(s, true)),
       roles: db.roles,
       items: db.items,
-      today: { given, taken, purchases }
+      today: { given, taken, purchases },
+      missions: db.missions,
+      assignments: db.assignments.map(assignmentView),
+      pendingCount: db.submissions.filter(x => x.status === 'pending').length,
+      classGoal: classGoal(db, { teacher: true }),
+      luck: { todayPlays: luckToday.length, todayFees: luckToday.reduce((a, t) => a + (t.fee || 0), 0), ...classLuckTotals(db) }
     };
+  }
+
+  if (path === '/teacher/missions' && method === 'GET') {
+    const today = todayStr();
+    const approvedToday = db.submissions.filter(x => x.status === 'approved' && (x.reviewedAt || '').startsWith(today));
+    const reviewed = db.submissions.filter(x => x.status !== 'pending')
+      .sort((a, b) => String(b.reviewedAt || b.createdAt).localeCompare(String(a.reviewedAt || a.createdAt)));
+    return {
+      missions: db.missions,
+      pending: db.submissions.filter(x => x.status === 'pending').sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
+      recent: reviewed.slice(0, 30),
+      today: { approved: approvedToday.length, coins: approvedToday.reduce((a, x) => a + x.reward, 0) }
+    };
+  }
+
+  if (path === '/teacher/missions/review' && method === 'POST') {
+    const action = body?.action;
+    if (!['approve', 'reject'].includes(action)) throw new Error('승인 또는 반려를 골라 주세요.');
+    const ids = new Set((body?.ids || []).map(String));
+    const targets = db.submissions.filter(x => ids.has(x.id) && x.status === 'pending');
+    if (!targets.length) throw new Error('처리할 미션이 없어요. 이미 처리됐을 수 있어요.');
+    const stamp = nowStr();
+    const results = [];
+    for (const sub of targets) {
+      sub.reviewedAt = stamp;
+      const s = findStudent(sub.studentId);
+      if (action === 'reject' || !s) { sub.status = 'rejected'; continue; }
+      if (sub.assignmentId && db.submissions.some(x => x !== sub && x.studentId === sub.studentId && x.assignmentId === sub.assignmentId && x.status === 'approved')) {
+        sub.status = 'rejected';
+        continue;
+      }
+      sub.status = 'approved';
+      results.push(payStudent(db, s, sub.reward, `미션: ${sub.missionName}${sub.note ? ` · ${sub.note}` : ''}`, stamp));
+    }
+    saveLocalDB(db);
+    return { ok: true, count: targets.length, results };
+  }
+
+  if (path === '/teacher/missions' && method === 'POST') {
+    const m = { id: uid('m'), ...parseMission(body), kind: '', createdAt: nowStr() };
+    db.missions.push(m);
+    saveLocalDB(db);
+    return { ok: true, mission: m };
+  }
+
+  if (path.startsWith('/teacher/missions/') && (method === 'PUT' || method === 'DELETE')) {
+    const mid = decodeURIComponent(path.replace('/teacher/missions/', ''));
+    const m = db.missions.find(x => x.id === mid);
+    if (!m) throw new Error('미션을 찾을 수 없어요.');
+    if (method === 'PUT') Object.assign(m, parseMission(body));
+    else db.missions = db.missions.filter(x => x.id !== mid);
+    saveLocalDB(db);
+    return { ok: true, mission: m };
+  }
+
+  if (path === '/teacher/vote/open' && method === 'POST') {
+    if (db.vote && db.vote.status === 'open') throw new Error('이미 학급 회의가 열려 있어요.');
+    const g = classGoal(db);
+    if (!g.ready) throw new Error(`학급 화폐가 ${g.goal - g.total}만큼 더 모여야 학급 회의를 열 수 있어요.`);
+    db.vote = { id: uid('v'), topic: 'pe', status: 'open', openedAt: nowStr(), closedAt: null, votes: {}, result: null };
+    saveLocalDB(db);
+    return { ok: true };
+  }
+
+  if (path === '/teacher/vote/close' && method === 'POST') {
+    const v = db.vote;
+    if (!v || v.status !== 'open') throw new Error('열린 학급 회의가 없어요.');
+    const ids = new Set(db.students.map(s => s.id));
+    const vals = Object.entries(v.votes || {}).filter(([k]) => ids.has(k)).map(([, c]) => c);
+    const n = ids.size;
+    const yes = vals.filter(c => c === 'yes').length;
+    const no = vals.filter(c => c === 'no').length;
+    const rate = n ? Math.round(yes * 100 / n) : 0;
+    const passed = n > 0 && yes * 100 >= PE_PASS_RATE * n;
+    const result = { yes, no, total: n, rate, passed, spent: 0 };
+    const stamp = nowStr();
+    if (passed) {
+      const g = classGoal(db);
+      if (!g.ready) throw new Error('그 사이 학급 화폐가 목표보다 줄었어요. 회의를 취소하고 조금 더 모은 뒤 다시 열어 주세요.');
+      result.spent = spendClassGoal(db, g.goal, `🏃 자율 체육 (학급 회의 찬성 ${rate}%)`, stamp);
+      db.peEvents.push({ id: uid('e'), date: stamp, spent: result.spent, yes, no, total: n, rate });
+    }
+    Object.assign(v, { status: passed ? 'passed' : 'failed', closedAt: stamp, result });
+    saveLocalDB(db);
+    return { ok: true, result };
+  }
+
+  if (path === '/teacher/vote/cancel' && method === 'POST') {
+    if (!db.vote || db.vote.status !== 'open') throw new Error('열린 학급 회의가 없어요.');
+    Object.assign(db.vote, { status: 'canceled', closedAt: nowStr() });
+    saveLocalDB(db);
+    return { ok: true };
   }
 
   if (path === '/teacher/transactions' && method === 'GET') {
@@ -357,19 +866,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
   }
 
   if (path === '/teacher/world' && method === 'GET') {
-    const cities = CITIES_DATA.map(c => {
-      const owner = db.students.find(s => (s.claimedCities || []).includes(c.id));
-      return {
-        ...c,
-        ownerStudentId: owner ? owner.id : null,
-        ownerStudentNumber: owner ? owner.number : null,
-        ownerStudentName: owner ? owner.name : null,
-        animalName: owner?.animal?.name || null,
-        animalEmoji: owner?.animal?.emoji || null,
-        animalTitle: owner?.animal?.title || null
-      };
-    });
-    return { cities, students: db.students.map(s => studentView(s, false)) };
+    return worldCities();
   }
 
   if (path === '/teacher/pay' && method === 'POST') {
@@ -381,35 +878,26 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     if (!ids.length) throw new Error('학생을 한 명 이상 골라 주세요.');
     const stamp = nowStr();
     const results = [];
-
-    if (!db.transactions) db.transactions = [];
+    const skipped = [];
+    // 미션 버튼으로 지급하면 오늘 그 미션을 받은 것으로 기록 (같은 날 두 번 받지 않게)
+    const mission = kind === 'give' && body?.missionId ? db.missions.find(m => m.id === String(body.missionId)) : null;
+    if (mission?.kind === 'assignment') throw new Error('선생님 과제 보상은 학생이 제출한 답안을 확인한 뒤 승인해 주세요.');
+    const why = reason || (kind === 'give' ? '선생님 지급' : '선생님 차감');
 
     for (const sid of ids) {
       const s = findStudent(sid);
       if (!s) continue;
-      const before = levelInfo(s.exp).level;
       if (kind === 'give') {
-        s.balance = (s.balance || 0) + amt;
-        s.exp = (s.exp || 0) + amt;
-      } else {
-        s.balance = (s.balance || 0) - amt;
+        if (mission && !markMissionPaid(db, s, mission, amt, stamp)) { skipped.push(s.name); continue; }
+        results.push(payStudent(db, s, amt, why, stamp));
+        continue;
       }
-      const after = levelInfo(s.exp).level;
-      const tx = {
-        id: uid('t'),
-        studentId: s.id,
-        studentName: s.name,
-        type: kind,
-        amount: amt,
-        reason: reason || (kind === 'give' ? '선생님 지급' : '선생님 차감'),
-        balanceAfter: s.balance,
-        createdAt: stamp
-      };
-      db.transactions.push(tx);
-      results.push({ id: s.id, name: s.name, levelUp: after > before, level: after });
+      s.balance = (s.balance || 0) - amt;
+      db.transactions.push({ id: uid('t'), studentId: s.id, studentName: s.name, type: kind, amount: amt, reason: why, balanceAfter: s.balance, createdAt: stamp });
+      results.push({ id: s.id, name: s.name, levelUp: false, level: levelInfo(s.exp).level });
     }
     saveLocalDB(db);
-    return { ok: true, results };
+    return { ok: true, results, skipped };
   }
 
   // 교사 상품 관리
@@ -419,7 +907,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
       emoji: body.emoji || '🎁',
       name: body.name,
       type: body.type || 'coupon',
-      price: Number(body.price) || 10,
+      price: Math.max(1, Math.floor(Number(body.price)) || 10),
       description: body.description || '',
       active: true,
       createdAt: nowStr()
@@ -433,7 +921,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     const iid = path.replace('/teacher/items/', '');
     const idx = db.items.findIndex(i => i.id === iid);
     if (idx !== -1) {
-      db.items[idx] = { ...db.items[idx], ...body };
+      db.items[idx] = { ...db.items[idx], ...body, price: Math.max(1, Math.floor(Number(body.price)) || db.items[idx].price) };
       saveLocalDB(db);
       return { ok: true, item: db.items[idx] };
     }
@@ -493,9 +981,25 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
 
   // 교사 설정 및 학생 관리
   if (path === '/teacher/settings' && method === 'PUT') {
-    db.settings = { ...db.settings, ...body };
+    const st = db.settings;
+    const className = String(body?.className || '').trim();
+    const currencyName = String(body?.currencyName || '').trim();
+    if (!className) throw new Error('학급 이름을(를) 입력해 주세요.');
+    if (!currencyName) throw new Error('화폐 이름을(를) 입력해 주세요.');
+    st.className = className.slice(0, 20);
+    st.currencyName = currencyName.slice(0, 10);
+    if (body?.teacherPin) {   // 비워 두면 PIN은 그대로
+      if (!/^\d{4}$/.test(String(body.teacherPin))) throw new Error('PIN은 숫자 4자리여야 해요.');
+      st.teacherPin = String(body.teacherPin);
+    }
+    if ('luckEnabled' in (body || {})) st.luckEnabled = !!body.luckEnabled;
+    if (body?.peGoalDays !== undefined && body.peGoalDays !== '') {
+      const d = Math.floor(Number(body.peGoalDays));
+      if (!(d >= 1 && d <= 60)) throw new Error('자율 체육 목표 일수은(는) 1~60 사이로 입력해 주세요.');
+      st.peGoalDays = d;
+    }
     saveLocalDB(db);
-    return { ok: true, settings: db.settings };
+    return { ok: true };
   }
 
   if (path === '/teacher/students' && method === 'POST') {
@@ -509,6 +1013,8 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
       pin: body.pin || '1234',
       balance: 100,
       exp: 150,
+      characterLevel: 1,
+      territoryPurchases: 0,
       roleId: null,
       createdAt: nowStr(),
       animal: {
@@ -520,6 +1026,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
       homeCity: city.id,
       claimedCities: [city.id],
       claimedTiles: 6,
+      claimedCityTiles: { [city.id]: 6 },
       energy: 3,
       friends: p.friends
     };

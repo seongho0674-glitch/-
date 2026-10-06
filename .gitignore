@@ -5,3 +5,10 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# 실제 교실 데이터와 백업은 PC에서만 보관합니다.
+/data/
+/backup_*/
+/.vercel/
+/qa/
+*.log

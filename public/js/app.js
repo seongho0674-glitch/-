@@ -1,18 +1,26 @@
 // ==========================================================
 // 앱 시작점: 화면 이동(라우팅), 시작 화면, 학생 선택, PIN 입력
 // ==========================================================
-import { $, $$, esc, api, session, toast, avatar, loadingHTML, errorHTML } from './core.js';
+import { $, $$, esc, api, session, toast, avatar, loadingHTML, errorHTML, getAppMode } from './core.js';
 import { renderStudent } from './student.js';
 import { renderTeacher } from './teacher.js';
+import { createWorldMap } from './world3d.js';
 
 const app = $('#app');
 let cleanup = null;
+let routeSeq = 0;
 
 async function route() {
   if (typeof cleanup === 'function') cleanup();
   cleanup = null;
   $('#modal-root').innerHTML = '';
   window.scrollTo(0, 0);
+  const seq = ++routeSeq;
+  // 화면을 그리는 사이 다른 화면으로 옮겨 갔다면, 늦게 끝난 화면은 바로 정리한다
+  const keep = (fn) => {
+    if (seq === routeSeq) cleanup = fn;
+    else if (typeof fn === 'function') fn();
+  };
 
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   const [area, sub, extra] = parts;
@@ -21,10 +29,10 @@ async function route() {
   try {
     if (area === 'student') {
       if (s?.role !== 'student') return go('#/');
-      cleanup = await renderStudent(app, sub || 'home');
+      keep(await renderStudent(app, sub || 'home'));
     } else if (area === 'teacher') {
       if (s?.role !== 'teacher') return go('#/');
-      cleanup = await renderTeacher(app, sub || 'home');
+      keep(await renderTeacher(app, sub || 'home'));
     } else if (area === 'login' && sub === 'student') {
       await renderStudentPick();
     } else if (area === 'login' && sub === 'pin' && extra) {
@@ -34,7 +42,7 @@ async function route() {
     } else {
       if (s?.role === 'student') return go('#/student');
       if (s?.role === 'teacher') return go('#/teacher');
-      await renderStart();
+      keep(await renderStart());
     }
   } catch (e) {
     app.innerHTML = errorHTML(e.message);
@@ -50,30 +58,40 @@ function go(hash) {
 async function renderStart() {
   app.innerHTML = loadingHTML();
   const info = await api('/public/info');
-  document.title = `${info.className} 학급경제 게임`;
+  document.title = `서초롱 민주시민 경제교육 · ${info.className}`;
   app.innerHTML = `
     <section class="start">
       <div class="start-inner">
-        <div class="hero-coin" aria-hidden="true">🪙</div>
-        <span class="class-tag">🏫 ${esc(info.className)} · Classimal World</span>
-        <h1 class="hero-title">우리 반 <span class="grad">학급경제 & 3D 월드</span></h1>
-        <p class="hero-sub">${esc(info.currencyName)}을 모으고, 내 수호동물과 함께 21개 글로벌 도시의 랜드마크를 탐험해 보세요!</p>
+        <div class="hero-globe" aria-hidden="true"><div id="start-globe"></div><span class="hero-coin-badge">🪙</span></div>
+        <span class="class-tag">🏫 ${esc(info.className)} · 함께 만드는 우리 반</span>
+        <h1 class="hero-title"><span class="grad">서초롱<br>민주시민 경제교육</span></h1>
+        <p class="hero-sub">과제를 풀고 ${esc(info.currencyName)}을 모아 세금을 내고, 내 캐릭터와 영토를 키워 보세요!</p>
         <div class="choice-grid">
           <a class="choice-card student" href="#/login/student" id="choose-student">
             <span class="choice-arrow">→</span>
             <span class="choice-emoji">🎒</span>
             <div class="choice-title">학생으로 들어가기</div>
-            <p class="choice-desc">내 ${esc(info.currencyName)} · 레벨 · 3D 세계지도 · 오늘 할 일</p>
+            <p class="choice-desc">선생님 과제 · 내 ${esc(info.currencyName)} · 캐릭터 키우기 · 1인 1역</p>
           </a>
           <a class="choice-card teacher" href="#/login/teacher" id="choose-teacher">
             <span class="choice-arrow">→</span>
             <span class="choice-emoji">🧑‍🏫</span>
             <div class="choice-title">선생님으로 들어가기</div>
-            <p class="choice-desc">화폐 지급 · 3D 월드 현황 · 상점 관리 · 1인 1역</p>
+            <p class="choice-desc">과제·PDF 업로드 · 답안 확인 · 상점 관리 · 1인 1역</p>
           </a>
         </div>
+        ${getAppMode() === 'mock' ? `
+          <p class="mode-note" role="note">🧪 <b>체험 모드</b> · 기록은 이 브라우저에만 저장돼요. 교실에서 함께 쓰려면 교실 PC에서 <b>실행하기.bat</b>으로 서버를 켜 주세요. (선생님 PIN 0000 · 학생 PIN 1234)</p>` : ''}
       </div>
     </section>`;
+
+  // 동물 친구들이 사는 지구본 (도시 정보는 로그인 없이 볼 수 있음)
+  let cities = [];
+  try { cities = (await api('/world/cities')).cities || []; } catch { /* 지구본만 보여 줌 */ }
+  const el = $('#start-globe');
+  if (!el) return null;
+  const globe = createWorldMap(el, { cities, compact: true, interactive: false, autoRotate: true, stars: false, globeScale: 0.34 });
+  return () => globe.destroy();
 }
 
 // ---------- 학생 선택 ----------
