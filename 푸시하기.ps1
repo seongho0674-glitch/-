@@ -21,7 +21,8 @@ try {
     $taskPaths = @('.gitignore','index.html','vercel.json','README.md','server.py',
         'class-roster.json','실행하기.bat','푸시하기.bat','푸시하기.ps1',
         'css','js','assets','public','.github',
-        'tests/test_server.py','tests/test_mock.mjs','tests/test_ui.cjs')
+        'tests/test_server.py','tests/test_mock.mjs','tests/test_ui.cjs','tests/test_cloud.py',
+        'api','requirements.txt')
     $taskExisting = @($taskPaths | Where-Object { Test-Path -LiteralPath (Join-Path $taskRoot $_) })
     Invoke-AppGit -GitArgs (@('add','--') + $taskExisting) | Out-Null
     # 실제 학급 기록은 로컬에 보존하고 Git 추적만 해제합니다.

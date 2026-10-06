@@ -1,7 +1,7 @@
 // ==========================================================
 // 앱 시작점: 화면 이동(라우팅), 시작 화면, 학생 선택, PIN 입력
 // ==========================================================
-import { $, $$, esc, api, session, toast, avatar, loadingHTML, errorHTML, getAppMode } from './core.js';
+import { $, $$, esc, api, session, classCode, toast, avatar, loadingHTML, errorHTML, getAppMode } from './core.js';
 import { renderStudent } from './student.js';
 import { renderTeacher } from './teacher.js';
 import { createWorldMap } from './world3d.js';
@@ -98,11 +98,13 @@ async function renderStart() {
 async function renderStudentPick() {
   app.innerHTML = loadingHTML();
   const info = await api('/public/info');
+  if (info.needCode) return renderClassCode(info);   // 웹 버전: 학급 코드를 아는 기기에서만 이름 목록
   app.innerHTML = `
     <section class="login-wrap">
       <div class="login-head">
         <a class="btn btn-ghost" href="#/" id="back-start">← 처음으로</a>
         <h1>내 이름을 눌러 주세요</h1>
+        ${classCode.get() ? '<button class="btn btn-ghost btn-sm" id="change-code" type="button">학급 코드 바꾸기</button>' : ''}
       </div>
       <div class="pick-grid">
         ${info.students.map((s, i) => `
@@ -113,6 +115,36 @@ async function renderStudentPick() {
       </div>
       ${info.students.length ? '' : '<div class="empty"><span class="emo">🙈</span>아직 등록된 학생이 없어요. 선생님께 말씀드려 주세요.</div>'}
     </section>`;
+  $('#change-code')?.addEventListener('click', () => { classCode.clear(); repaintPick(); });
+}
+
+// ---------- 학급 코드 (웹 버전) ----------
+function renderClassCode(info) {
+  app.innerHTML = `
+    <section class="pin-screen">
+      <form class="card pin-card" id="code-card" autocomplete="off">
+        <div class="row" style="margin-bottom:6px"><a class="btn btn-ghost btn-sm" href="#/" id="code-back">← 처음으로</a></div>
+        <span class="avatar pin-avatar" style="background:linear-gradient(135deg,#34d399,#0ea5e9)">🏫</span>
+        <h1 class="pin-title">학급 코드</h1>
+        <p class="muted">선생님이 알려 준 학급 코드를 입력해 주세요.<br>이 기기에서는 처음 한 번만 입력하면 돼요.</p>
+        <input class="input" id="class-code" maxlength="8" autocapitalize="characters" spellcheck="false" placeholder="예: K7P4QX" aria-label="학급 코드"
+          style="text-align:center;font-size:26px;letter-spacing:6px;text-transform:uppercase;margin:14px 0 4px">
+        <div class="pin-msg" id="code-msg" role="alert">${info.codeWrong ? '학급 코드가 맞지 않아요. 다시 확인해 주세요.' : ''}</div>
+        <button class="btn btn-primary btn-lg" type="submit" id="code-ok" style="width:100%">확인</button>
+      </form>
+    </section>`;
+  const input = $('#class-code');
+  input.focus();
+  $('#code-card').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!input.value.trim()) { $('#code-msg').textContent = '학급 코드를 입력해 주세요.'; return; }
+    classCode.set(input.value);
+    repaintPick();
+  });
+}
+
+function repaintPick() {
+  renderStudentPick().catch((err) => { app.innerHTML = errorHTML(err.message); });
 }
 
 // ---------- PIN 입력 (학생/교사 공통) ----------

@@ -416,11 +416,11 @@ function parseAssignment(body, db) {
   if (pdfData) {
     const prefix = 'data:application/pdf;base64,';
     const encoded = pdfData.slice(prefix.length);
-    if (!pdfData.startsWith(prefix) || !encoded || encoded.length > Math.ceil(5 * 1024 * 1024 / 3) * 4 || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('5MB 이하의 올바른 PDF 파일을 업로드해 주세요.');
+    if (!pdfData.startsWith(prefix) || !encoded || encoded.length > Math.ceil(3 * 1024 * 1024 / 3) * 4 || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('3MB 이하의 올바른 PDF 파일을 업로드해 주세요.');
     let decoded;
     try { decoded = atob(encoded); }
     catch { throw new Error('PDF 파일을 읽을 수 없어요. 파일을 다시 선택해 주세요.'); }
-    if (decoded.length > 5 * 1024 * 1024 || !decoded.startsWith('%PDF-')) throw new Error('5MB 이하의 올바른 PDF 파일을 업로드해 주세요.');
+    if (decoded.length > 3 * 1024 * 1024 || !decoded.startsWith('%PDF-')) throw new Error('3MB 이하의 올바른 PDF 파일을 업로드해 주세요.');
     if (!pdfName) throw new Error('PDF 파일 이름을 입력해 주세요.');
   }
   return { title, instructions, reward, studentIds, pdfName: pdfData ? pdfName : '', pdfData, active: true };

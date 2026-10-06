@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-학급경제 게임 - 교실 PC용 서버
-- Python 3 표준 라이브러리만 사용합니다 (추가 설치 필요 없음).
-- 데이터는 data/db.json 파일에 저장됩니다.
-- 실행: python server.py  (또는 '실행하기.bat' 더블클릭)
+학급경제 게임 서버
+- 교실 PC: Python 3 표준 라이브러리만 사용합니다 (추가 설치 필요 없음).
+  데이터는 data/db.json 파일에 저장됩니다.
+  실행: python server.py  (또는 '실행하기.bat' 더블클릭)
+- 웹(Vercel): api/index.py가 이 파일의 규칙을 그대로 쓰고, 데이터는 Neon(Postgres)에 저장합니다.
+  (CLASS_ECONOMY_STORAGE=postgres, DATABASE_URL 환경변수 필요)
 """
 import base64
 import binascii
+import hashlib
 import json
 import mimetypes
 import os
@@ -17,7 +20,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
 
@@ -33,6 +36,36 @@ SESSIONS = {}                     # token -> {"role": "teacher"|"student", "stud
 FAILED = {}                       # 로그인 실패 횟수 기록 (PIN 무작위 입력 방지)
 MAX_FAIL = 5
 LOCK_SECONDS = 30
+
+# 저장 방식: "file"(교실 PC, data/db.json) 또는 "postgres"(Vercel + Neon)
+STORAGE = (os.environ.get("CLASS_ECONOMY_STORAGE") or "file").strip().lower()
+CLOUD = STORAGE == "postgres"
+SESSION_DAYS = 30                 # 웹 버전 로그인 유지 기간
+DEFAULT_TEACHER_PIN = "0000"
+CLASS_CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # 헷갈리는 0·O·1·I·L 제외
+
+# 한국 시간(서머타임 없음). Vercel 서버는 UTC라서 그대로 두면 '오늘'이 아침 9시에 바뀐다.
+KST = timezone(timedelta(hours=9))
+
+
+def local_now():
+    return datetime.now(KST).replace(tzinfo=None)
+
+
+def find_database_url():
+    """Vercel에 Neon을 연결하면 자동으로 생기는 환경변수 이름들을 차례로 찾는다."""
+    for key in ("DATABASE_URL", "POSTGRES_URL", "NEON_DATABASE_URL"):
+        value = (os.environ.get(key) or "").strip()
+        if value.startswith(("postgres://", "postgresql://")):
+            return value
+    for key in sorted(os.environ):   # 접두사를 붙여 연결한 경우 (예: STORAGE_DATABASE_URL)
+        value = (os.environ.get(key) or "").strip()
+        if key.endswith(("_DATABASE_URL", "_POSTGRES_URL")) and value.startswith(("postgres://", "postgresql://")):
+            return value
+    return ""
+
+
+DATABASE_URL = find_database_url() if CLOUD else ""
 
 # Windows에서 .js 파일 형식을 잘못 알려주는 경우가 있어 직접 지정
 MIME = {
@@ -50,7 +83,7 @@ MIME = {
 
 # ─────────────────────────── 데이터 ───────────────────────────
 def now_str():
-    return datetime.now().isoformat(timespec="seconds")
+    return local_now().isoformat(timespec="seconds")
 
 
 def new_id(prefix):
@@ -680,7 +713,11 @@ def load_db():
 
 
 def save_db(db):
-    """임시 파일에 먼저 쓰고 교체해서, 저장 중 꺼져도 파일이 깨지지 않게 합니다."""
+    """임시 파일에 먼저 쓰고 교체해서, 저장 중 꺼져도 파일이 깨지지 않게 합니다.
+    웹 버전에서는 '바뀜' 표시만 하고, 요청이 끝날 때 Neon에 한 번에 저장합니다."""
+    if CLOUD:
+        _REQ.dirty = True
+        return
     os.makedirs(DATA_DIR, exist_ok=True)
     tmp = DB_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -694,7 +731,8 @@ def save_db(db):
     raise RuntimeError("데이터 파일을 저장하지 못했어요.")
 
 
-DB = load_db()
+_REQ = threading.local()          # 웹 버전: 요청 하나 동안의 DB 연결과 '바뀜' 표시
+DB = {} if CLOUD else load_db()   # 웹 버전은 요청마다 Neon에서 읽어 온다
 
 
 # ─────────────────────────── 계산 도우미 ───────────────────────────
@@ -736,10 +774,11 @@ def public_settings():
 
 
 class ApiError(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, code=None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.code = code
 
 
 def req_str(body, key, label, max_len=40, required=True):
@@ -769,13 +808,27 @@ def req_pin(body, key="pin"):
 
 
 def check_lockout(key):
-    info = FAILED.get(key)
-    if info and info["until"] > time.time():
-        left = int(info["until"] - time.time()) + 1
+    if CLOUD:
+        row = _REQ.conn.execute("SELECT locked_until FROM app_login_failures WHERE key = %s", (key,)).fetchone()
+        until = float(row[0]) if row else 0
+    else:
+        info = FAILED.get(key)
+        until = info["until"] if info else 0
+    if until > time.time():
+        left = int(until - time.time()) + 1
         raise ApiError(429, f"PIN을 여러 번 틀렸어요. {left}초 뒤에 다시 시도해 주세요.")
 
 
 def record_fail(key):
+    if CLOUD:   # 여러 서버가 함께 일해도 실패 횟수가 이어지도록 DB에 기록
+        count = _REQ.conn.execute(
+            "INSERT INTO app_login_failures (key, fail_count) VALUES (%s, 1) "
+            "ON CONFLICT (key) DO UPDATE SET fail_count = app_login_failures.fail_count + 1 "
+            "RETURNING fail_count", (key,)).fetchone()[0]
+        if count >= MAX_FAIL:
+            _REQ.conn.execute("UPDATE app_login_failures SET fail_count = 0, locked_until = %s WHERE key = %s",
+                              (time.time() + LOCK_SECONDS, key))
+        return
     info = FAILED.setdefault(key, {"count": 0, "until": 0})
     info["count"] += 1
     if info["count"] >= MAX_FAIL:
@@ -783,16 +836,96 @@ def record_fail(key):
         info["until"] = time.time() + LOCK_SECONDS
 
 
+def clear_fail(key):
+    if CLOUD:
+        _REQ.conn.execute("DELETE FROM app_login_failures WHERE key = %s", (key,))
+    else:
+        FAILED.pop(key, None)
+
+
+# ---- 로그인 세션 (교실 PC: 메모리 / 웹: Neon에 토큰의 해시만 저장) ----
+def token_hash(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def session_create(role, student_id=None):
+    token = secrets.token_urlsafe(24)
+    if CLOUD:
+        conn = _REQ.conn
+        conn.execute("DELETE FROM app_sessions WHERE created_at < now() - make_interval(days => %s)", (SESSION_DAYS,))
+        conn.execute("INSERT INTO app_sessions (token_hash, role, student_id) VALUES (%s, %s, %s)",
+                     (token_hash(token), role, student_id))
+    else:
+        SESSIONS[token] = {"role": role, "studentId": student_id}
+    return token
+
+
+def session_get(token):
+    if not token:
+        return None
+    if CLOUD:
+        row = _REQ.conn.execute(
+            "SELECT role, student_id FROM app_sessions WHERE token_hash = %s "
+            "AND created_at > now() - make_interval(days => %s)", (token_hash(token), SESSION_DAYS)).fetchone()
+        return {"role": row[0], "studentId": row[1]} if row else None
+    return SESSIONS.get(token)
+
+
+def session_drop(token):
+    if not token:
+        return
+    if CLOUD:
+        _REQ.conn.execute("DELETE FROM app_sessions WHERE token_hash = %s", (token_hash(token),))
+    else:
+        SESSIONS.pop(token, None)
+
+
+def sessions_drop_students(student_id=None):
+    """학생 한 명(student_id) 또는 모든 학생의 로그인을 끝낸다."""
+    if CLOUD:
+        if student_id:
+            _REQ.conn.execute("DELETE FROM app_sessions WHERE student_id = %s", (student_id,))
+        else:
+            _REQ.conn.execute("DELETE FROM app_sessions WHERE role = 'student'")
+        return
+    for tok in [t for t, v in SESSIONS.items()
+                if v.get("role") == "student" and (not student_id or v.get("studentId") == student_id)]:
+        SESSIONS.pop(tok, None)
+
+
+# ---- 학급 코드 (웹 버전: 코드를 아는 사람에게만 학생 이름을 보여 준다) ----
+def new_class_code():
+    return "".join(secrets.choice(CLASS_CODE_CHARS) for _ in range(6))
+
+
+def normalize_code(value):
+    return re.sub(r"[^0-9A-Z]", "", str(value or "").upper())
+
+
+def class_code_ok(ctx):
+    if not CLOUD:
+        return True
+    code = DB["settings"].get("classCode")
+    return not code or secrets.compare_digest(normalize_code(ctx.get("classCode")), code)
+
+
 # ─────────────────────────── API 처리 함수 ───────────────────────────
 def api_public_info(ctx):
+    if not class_code_ok(ctx):
+        # 웹 버전: 학급 코드를 모르면 학생 이름을 보여 주지 않는다
+        return {**public_settings(), "students": [], "needCode": True,
+                "codeWrong": bool(normalize_code(ctx.get("classCode")))}
     return {
         **public_settings(),
         "students": [{"id": s["id"], "number": s["number"], "name": s["name"]} for s in sorted_students()],
+        "needCode": False,
     }
 
 
 def api_login_student(ctx):
     body = ctx["body"]
+    if not class_code_ok(ctx):
+        raise ApiError(403, "학급 코드를 먼저 입력해 주세요.")
     s = find(DB["students"], str(body.get("studentId", "")))
     if not s:
         raise ApiError(404, "학생을 찾을 수 없어요.")
@@ -801,9 +934,8 @@ def api_login_student(ctx):
     if str(body.get("pin", "")) != s["pin"]:
         record_fail(key)
         raise ApiError(403, "PIN이 맞지 않아요.")
-    FAILED.pop(key, None)
-    token = secrets.token_urlsafe(24)
-    SESSIONS[token] = {"role": "student", "studentId": s["id"]}
+    clear_fail(key)
+    token = session_create("student", s["id"])
     return {"token": token, "role": "student", "studentId": s["id"], "name": s["name"]}
 
 
@@ -813,14 +945,13 @@ def api_login_teacher(ctx):
     if str(ctx["body"].get("pin", "")) != DB["settings"]["teacherPin"]:
         record_fail(key)
         raise ApiError(403, "PIN이 맞지 않아요.")
-    FAILED.pop(key, None)
-    token = secrets.token_urlsafe(24)
-    SESSIONS[token] = {"role": "teacher", "studentId": None}
+    clear_fail(key)
+    token = session_create("teacher")
     return {"token": token, "role": "teacher", "name": "선생님"}
 
 
 def api_logout(ctx):
-    SESSIONS.pop(ctx["token"], None)
+    session_drop(ctx["token"])
     return {"ok": True}
 
 
@@ -877,14 +1008,28 @@ def api_student_buy(ctx):
 
 
 # ---- 교사 ----
+def must_change_teacher_pin():
+    """웹 버전은 누구나 주소로 들어올 수 있어서, 처음 PIN(0000)을 바꾸기 전에는 다른 기능을 막는다."""
+    return CLOUD and DB["settings"].get("teacherPin") == DEFAULT_TEACHER_PIN
+
+
+def student_addresses(ctx):
+    if CLOUD:
+        host = ctx.get("host") or ""
+        return [f"https://{host}"] if host else []
+    return [f"http://{ip}:{PORT}" for ip in local_ips()]
+
+
 def api_teacher_state(ctx):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = today_str()
     given = sum(t["amount"] for t in DB["transactions"] if t["type"] == "give" and t["createdAt"].startswith(today))
     taken = sum(t["amount"] for t in DB["transactions"] if t["type"] == "take" and t["createdAt"].startswith(today))
     bought = sum(1 for t in DB["transactions"] if t["type"] == "buy" and t["createdAt"].startswith(today))
     luck_today = [t for t in DB["transactions"] if t["type"] == "luck" and t["createdAt"].startswith(today)]
     return {
-        "settings": {**public_settings(), "defaultPin": DB["settings"]["teacherPin"] == "0000",
+        "settings": {**public_settings(), "defaultPin": DB["settings"]["teacherPin"] == DEFAULT_TEACHER_PIN,
+                     "mustChangePin": must_change_teacher_pin(), "cloud": CLOUD,
+                     "classCode": DB["settings"].get("classCode", "") if CLOUD else "",
                      "luckEnabled": bool(DB["settings"].get("luckEnabled", True)),
                      "peGoalDays": int(DB["settings"].get("peGoalDays", 10))},
         "students": [student_view(s, include_pin=True) for s in sorted_students()],
@@ -896,7 +1041,7 @@ def api_teacher_state(ctx):
         "classGoal": class_goal(teacher=True),
         "luck": {"todayPlays": len(luck_today), "todayFees": sum(t.get("fee", 0) for t in luck_today),
                  **class_luck_totals()},
-        "addresses": [f"http://{ip}:{PORT}" for ip in local_ips()],   # 학생 기기에서 접속할 주소
+        "addresses": student_addresses(ctx),   # 학생 기기에서 접속할 주소
     }
 
 
@@ -1088,8 +1233,7 @@ def api_student_delete(ctx):
     if not s:
         raise ApiError(404, "학생을 찾을 수 없어요.")
     DB["students"].remove(s)
-    for tok in [t for t, v in SESSIONS.items() if v.get("studentId") == s["id"]]:
-        SESSIONS.pop(tok, None)
+    sessions_drop_students(s["id"])
     save_db(DB)
     return {"ok": True}
 
@@ -1100,7 +1244,17 @@ def api_settings(ctx):
     st["className"] = req_str(body, "className", "학급 이름", 20)
     st["currencyName"] = req_str(body, "currencyName", "화폐 이름", 10)
     if body.get("teacherPin"):
-        st["teacherPin"] = req_pin(body, "teacherPin")
+        pin = req_pin(body, "teacherPin")
+        if CLOUD and pin == DEFAULT_TEACHER_PIN:
+            raise ApiError(400, "0000은 누구나 아는 PIN이라 쓸 수 없어요. 다른 숫자 4자리를 정해 주세요.")
+        st["teacherPin"] = pin
+    elif must_change_teacher_pin():
+        raise ApiError(400, "새 선생님 PIN을 입력해 주세요. 처음 PIN(0000)을 바꿔야 다른 기능을 쓸 수 있어요.")
+    if CLOUD and "classCode" in body:
+        code = normalize_code(body.get("classCode"))
+        if not 4 <= len(code) <= 8:
+            raise ApiError(400, "학급 코드는 영어 대문자와 숫자 4~8자리로 정해 주세요.")
+        st["classCode"] = code
     if "luckEnabled" in body:
         st["luckEnabled"] = bool(body.get("luckEnabled"))
     if body.get("peGoalDays") not in (None, ""):
@@ -1121,13 +1275,16 @@ def api_restore(ctx):
         raise ApiError(400, "올바른 백업 파일이 아니에요.")
     if not all(isinstance(data[k], list) for k in keys[1:]):
         raise ApiError(400, "올바른 백업 파일이 아니에요.")
+    if CLOUD:
+        # 웹 버전: 지금 PIN·학급 코드는 그대로 둔다 (예전 백업의 0000으로 되돌아가 잠기지 않게)
+        keep = {k: DB["settings"].get(k) for k in ("teacherPin", "classCode") if DB["settings"].get(k)}
+        data.setdefault("settings", {}).update(keep)
     DB = data
     migrate_db(DB)              # 예전 백업에도 미션·학급 회의 칸을 채움
     ensure_student_fields(DB)   # 예전 백업에도 수호동물·도시 정보를 채움
     save_db(DB)
     # 학생 세션은 모두 초기화 (학생 목록이 바뀌었을 수 있음)
-    for tok in [t for t, v in SESSIONS.items() if v["role"] == "student"]:
-        SESSIONS.pop(tok, None)
+    sessions_drop_students()
     return {"ok": True}
 
 
@@ -1135,6 +1292,8 @@ def api_restore(ctx):
 def api_world_cities(ctx):
     """21개 도시 정보와 각 도시에 소속/개척된 학생들을 종합해서 반환합니다."""
     students = DB.get("students", [])
+    if CLOUD and not ctx.get("session") and not class_code_ok(ctx):
+        students = []   # 웹 버전: 로그인 전 첫 화면 지구본에는 학생 이름을 싣지 않는다
     city_map = {}
     for c in CITIES_DATA:
         city_map[c["id"]] = {
@@ -1285,8 +1444,10 @@ def api_student_expand_territory(ctx):
 
 
 # ─────────────────────────── 선생님 과제 · PDF 학습지 ───────────────────────────
-PDF_MAX_BYTES = 5 * 1024 * 1024
+# Vercel 함수는 요청·응답을 4.5MB까지만 주고받는다. PDF는 글자로 바꾸면 4/3배가 되므로 3MB로 제한한다.
+PDF_MAX_BYTES = 3 * 1024 * 1024
 PDF_PREFIX = "data:application/pdf;base64,"
+PDF_REF_PREFIX = "neon:"          # 웹 버전: PDF 본문은 app_pdfs 표에 두고 학급 데이터에는 표시만 남긴다
 
 
 def assignment_view(assignment):
@@ -1303,9 +1464,16 @@ def assignment_visible(assignment, student):
 def assignment_pdf(assignment):
     if not assignment:
         raise ApiError(404, "과제를 찾을 수 없어요.")
-    if not assignment.get("pdfData"):
+    data = assignment.get("pdfData") or ""
+    if not data:
         raise ApiError(404, "이 과제에는 PDF 학습지가 없어요.")
-    return {"pdfName": assignment["pdfName"], "pdfData": assignment["pdfData"]}
+    if data.startswith(PDF_REF_PREFIX):
+        row = _REQ.conn.execute("SELECT pdf_data FROM app_pdfs WHERE assignment_id = %s",
+                                (assignment["id"],)).fetchone() if CLOUD else None
+        if not row:
+            raise ApiError(404, "PDF 학습지를 찾을 수 없어요. 선생님께 다시 올려 달라고 말씀드려 주세요.")
+        data = row[0]
+    return {"pdfName": assignment["pdfName"], "pdfData": data}
 
 
 def api_teacher_assignments(ctx):
@@ -1330,13 +1498,13 @@ def api_teacher_assignment_create(ctx):
             raise ApiError(400, "PDF 파일을 선택해 주세요.")
         encoded = pdf_data[len(PDF_PREFIX):]
         if len(encoded) > ((PDF_MAX_BYTES + 2) // 3) * 4:
-            raise ApiError(413, "PDF 파일은 5MB 이하로 올려 주세요.")
+            raise ApiError(413, "PDF 파일은 3MB 이하로 올려 주세요.")
         try:
             decoded = base64.b64decode(encoded, validate=True)
         except (ValueError, binascii.Error):
             raise ApiError(400, "PDF 파일을 읽을 수 없어요. 다시 선택해 주세요.")
         if len(decoded) > PDF_MAX_BYTES:
-            raise ApiError(413, "PDF 파일은 5MB 이하로 올려 주세요.")
+            raise ApiError(413, "PDF 파일은 3MB 이하로 올려 주세요.")
         if not decoded.startswith(b"%PDF-"):
             raise ApiError(400, "올바른 PDF 파일이 아니에요.")
         if not pdf_name:
@@ -1405,7 +1573,7 @@ def api_teacher_world(ctx):
 
 # ─────────────────────────── 미션 ───────────────────────────
 def today_str():
-    return datetime.now().strftime("%Y-%m-%d")
+    return local_now().strftime("%Y-%m-%d")
 
 
 def today_submissions(student_id):
@@ -1717,6 +1885,216 @@ def api_student_luck(ctx):
             "student": student_view(s), "luck": luck_info(s)}
 
 
+# ─────────────────────────── 웹 버전 저장소 (Vercel + Neon Postgres) ───────────────────────────
+# 학급 데이터 전체를 app_state 표의 한 줄(JSON)로 두고, 요청마다 잠금을 걸어 읽고 고친 뒤 저장한다.
+# 교실 PC 버전(data/db.json)과 규칙·데이터 모양이 같아서 백업 파일을 서로 옮길 수 있다.
+SCHEMA_SQL = (
+    """CREATE TABLE IF NOT EXISTS app_state (
+        id smallint PRIMARY KEY,
+        version bigint NOT NULL,
+        data jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now())""",
+    """CREATE TABLE IF NOT EXISTS app_sessions (
+        token_hash text PRIMARY KEY,
+        role text NOT NULL,
+        student_id text,
+        created_at timestamptz NOT NULL DEFAULT now())""",
+    "CREATE INDEX IF NOT EXISTS app_sessions_student_idx ON app_sessions (student_id)",
+    """CREATE TABLE IF NOT EXISTS app_login_failures (
+        key text PRIMARY KEY,
+        fail_count integer NOT NULL DEFAULT 0,
+        locked_until double precision NOT NULL DEFAULT 0)""",
+    """CREATE TABLE IF NOT EXISTS app_pdfs (
+        assignment_id text PRIMARY KEY,
+        pdf_name text NOT NULL,
+        pdf_data text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now())""",
+)
+SCHEMA_LOCK_ID = 7351001          # 여러 서버가 동시에 처음 실행돼도 표 만들기·첫 데이터 넣기는 한 곳만
+STATE_ID = 1
+_PG = {"conn": None}
+_CACHE = {"key": None, "data": None}   # 바뀌지 않았으면 같은 서버에서는 다시 읽지 않는다 (전송량 절약)
+DB_DOWN_MESSAGE = "데이터베이스에 잠시 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요."
+
+
+class DbNotConfigured(Exception):
+    pass
+
+
+def pg_connection():
+    import psycopg   # 웹 버전에서만 필요 (교실 PC에는 설치하지 않아도 됨)
+    conn = _PG["conn"]
+    if conn is not None and not conn.closed and not conn.broken:
+        return conn
+    pg_reset()
+    if not DATABASE_URL:
+        raise DbNotConfigured()
+    conn = psycopg.connect(DATABASE_URL, autocommit=True, prepare_threshold=None, connect_timeout=10)
+    try:
+        with conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_ID,))
+            for sql in SCHEMA_SQL:
+                conn.execute(sql)
+    except Exception:
+        conn.close()
+        raise
+    _PG["conn"] = conn
+    return conn
+
+
+def drop_cache():
+    _CACHE["key"] = None
+    _CACHE["data"] = None
+
+
+def pg_reset():
+    conn, _PG["conn"] = _PG["conn"], None
+    drop_cache()
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def seed_cloud_db():
+    """웹 버전 첫 실행: 명부로 학급을 만들고 학생 PIN은 무작위 4자리, 학급 코드는 새로 정한다."""
+    db = seed_db()
+    ensure_student_fields(db)
+    for s in db["students"]:
+        s["pin"] = f"{secrets.randbelow(10000):04d}"
+    db["settings"]["classCode"] = new_class_code()
+    return db
+
+
+def cloud_load(conn, lock):
+    global DB
+    from psycopg.types.json import Jsonb
+    sql = "SELECT version, updated_at FROM app_state WHERE id = %s" + (" FOR UPDATE" if lock else "")
+    row = conn.execute(sql, (STATE_ID,)).fetchone()
+    if row is None:
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_ID + 1,))
+        if conn.execute("SELECT 1 FROM app_state WHERE id = %s", (STATE_ID,)).fetchone() is None:
+            conn.execute("INSERT INTO app_state (id, version, data) VALUES (%s, 1, %s)",
+                         (STATE_ID, Jsonb(seed_cloud_db())))
+        drop_cache()
+        row = conn.execute(sql, (STATE_ID,)).fetchone()
+    key = (int(row[0]), row[1])
+    if _CACHE["key"] != key or _CACHE["data"] is None:
+        _CACHE["data"] = conn.execute("SELECT data FROM app_state WHERE id = %s", (STATE_ID,)).fetchone()[0]
+        _CACHE["key"] = key
+    DB = _CACHE["data"]
+    _REQ.version = key[0]
+    _REQ.dirty = False
+    changed = migrate_db(DB)
+    ensure_student_fields(DB)          # 채운 칸이 있으면 save_db가 '바뀜' 표시
+    if not DB["settings"].get("classCode"):
+        DB["settings"]["classCode"] = new_class_code()
+        changed = True
+    if changed:
+        _REQ.dirty = True
+
+
+def cloud_save(conn, locked):
+    from psycopg.types.json import Jsonb
+    for a in DB.get("assignments", []):   # PDF 본문은 따로 저장 (매 요청마다 큰 파일을 주고받지 않게)
+        data = a.get("pdfData") or ""
+        if data.startswith(PDF_PREFIX):
+            conn.execute(
+                "INSERT INTO app_pdfs (assignment_id, pdf_name, pdf_data) VALUES (%s, %s, %s) "
+                "ON CONFLICT (assignment_id) DO UPDATE SET pdf_name = EXCLUDED.pdf_name, pdf_data = EXCLUDED.pdf_data",
+                (a["id"], a.get("pdfName") or "학습지.pdf", data))
+            a["pdfData"] = PDF_REF_PREFIX + a["id"]
+    sql = "UPDATE app_state SET data = %s, version = version + 1, updated_at = now() WHERE id = %s"
+    params = [Jsonb(DB), STATE_ID]
+    if not locked:   # 읽기 요청에서 생긴 자동 정리는, 그 사이 다른 저장이 없을 때만 쓴다
+        sql += " AND version = %s"
+        params.append(_REQ.version)
+    row = conn.execute(sql + " RETURNING version, updated_at", params).fetchone()
+    if row:
+        _CACHE["key"], _CACHE["data"] = (int(row[0]), row[1]), DB
+    else:
+        drop_cache()
+
+
+def authorize_and_run(fn, need, ctx):
+    ctx["session"] = session_get(ctx["token"])
+    if need and (not ctx["session"] or ctx["session"]["role"] != need):
+        raise ApiError(401, "다시 들어와 주세요.")
+    if need == "teacher" and fn not in PIN_CHANGE_ROUTES and must_change_teacher_pin():
+        raise ApiError(403, "먼저 설정에서 선생님 PIN을 바꿔 주세요. (처음 PIN 0000은 웹에서 쓸 수 없어요)",
+                       code="CHANGE_TEACHER_PIN")
+    return fn(ctx)
+
+
+def run_cloud(fn, need, ctx, method):
+    import psycopg
+    write = method != "GET"
+    with LOCK:   # 같은 서버 안에서는 한 번에 한 요청씩 (학급 데이터 공유)
+        for attempt in (1, 2):
+            started = False
+            failure = None
+            try:
+                conn = pg_connection()
+                _REQ.conn = conn
+                with conn.transaction():
+                    cloud_load(conn, lock=write)
+                    started = True
+                    try:
+                        result = authorize_and_run(fn, need, ctx)
+                    except ApiError as e:
+                        failure = e   # 로그인 실패 횟수 같은 기록은 남기고, 학급 데이터는 저장하지 않는다
+                    else:
+                        if _REQ.dirty:
+                            cloud_save(conn, locked=write)
+            except DbNotConfigured:
+                raise ApiError(503, "데이터베이스(Neon)가 아직 연결되지 않았어요. Vercel 프로젝트의 Storage에서 Neon을 연결해 주세요.",
+                               code="DB_NOT_CONFIGURED")
+            except psycopg.Error as e:
+                pg_reset()
+                print("[DB 오류]", type(e).__name__, str(e).splitlines()[0][:200] if str(e) else "", file=sys.stderr)
+                if attempt == 1 and not (write and started):   # 처리하기 전에 끊긴 경우만 한 번 더
+                    continue
+                raise ApiError(503, DB_DOWN_MESSAGE, code="DB_UNAVAILABLE")
+            except Exception:
+                drop_cache()
+                raise
+            finally:
+                _REQ.conn = None
+            if failure is not None:
+                drop_cache()
+                raise failure
+            return result
+
+
+def db_region():
+    """Neon 주소에서 지역 이름만 꺼낸다 (예: ap-southeast-1). 비밀번호·주소는 내보내지 않는다."""
+    try:
+        parts = (urlparse(DATABASE_URL).hostname or "").split(".")
+        return f"{parts[1]} ({parts[2]})" if len(parts) >= 5 and parts[-2:] == ["neon", "tech"] else ""
+    except Exception:
+        return ""
+
+
+def health_report():
+    info = {"ok": True, "storage": STORAGE, "fnRegion": os.environ.get("VERCEL_REGION", ""), "dbRegion": db_region()}
+    if not CLOUD:
+        return 200, {**info, "db": "file"}
+    if not DATABASE_URL:
+        return 503, {**info, "ok": False, "db": "missing"}
+    try:
+        with LOCK:
+            conn = pg_connection()
+            started = time.perf_counter()
+            conn.execute("SELECT 1")
+            ping = round((time.perf_counter() - started) * 1000, 1)
+            ready = conn.execute("SELECT 1 FROM app_state WHERE id = %s", (STATE_ID,)).fetchone() is not None
+        return 200, {**info, "db": "ok", "dbPingMs": ping, "initialized": ready}
+    except Exception as e:
+        pg_reset()
+        return 503, {**info, "ok": False, "db": "error", "detail": type(e).__name__}
+
+
 # (메서드, 경로 정규식, 함수, 필요한 권한)
 ROUTES = [
     ("GET", r"/api/public/info", api_public_info, None),
@@ -1768,6 +2146,12 @@ ROUTES = [
     ("POST", r"/api/teacher/restore", api_restore, "teacher"),
 ]
 ROUTES = [(m, re.compile("^" + p + "$"), f, r) for m, p, f, r in ROUTES]
+PIN_CHANGE_ROUTES = (api_teacher_state, api_settings)   # 처음 PIN을 바꾸기 전에도 쓸 수 있는 교사 기능
+
+
+def run_local(fn, need, ctx):
+    with LOCK:
+        return authorize_and_run(fn, need, ctx)
 
 
 # ─────────────────────────── HTTP 서버 ───────────────────────────
@@ -1787,6 +2171,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def handle_api(self, method, path):
+        if path == "/api/health" and method == "GET":   # 연결 상태 확인용 (비밀 정보는 내보내지 않음)
+            status, info = health_report()
+            self.send_json(status, info)
+            return
         for m, rx, fn, need in ROUTES:
             if m != method:
                 continue
@@ -1804,17 +2192,17 @@ class Handler(BaseHTTPRequestHandler):
                         body = json.loads(raw.decode("utf-8")) or {}
                     except ValueError:
                         raise ApiError(400, "잘못된 요청이에요.")
+                    if not isinstance(body, dict):
+                        raise ApiError(400, "잘못된 요청이에요.")
                 auth = self.headers.get("Authorization", "")
                 token = auth[7:] if auth.startswith("Bearer ") else ""
-                session = SESSIONS.get(token)
-                if need and (not session or session["role"] != need):
-                    raise ApiError(401, "다시 들어와 주세요.")
-                ctx = {"body": body, "params": match.groups(), "token": token, "session": session}
-                with LOCK:
-                    result = fn(ctx)
+                host = re.sub(r"[^A-Za-z0-9.:\-]", "", self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "")
+                ctx = {"body": body, "params": match.groups(), "token": token, "session": None,
+                       "host": host[:200], "classCode": self.headers.get("X-Class-Code", "")[:40]}
+                result = run_cloud(fn, need, ctx, method) if CLOUD else run_local(fn, need, ctx)
                 self.send_json(200, result)
             except ApiError as e:
-                self.send_json(e.status, {"error": e.message})
+                self.send_json(e.status, {"error": e.message, **({"code": e.code} if e.code else {})})
             except Exception as e:  # 예상하지 못한 오류
                 print("[오류]", repr(e), file=sys.stderr)
                 self.send_json(500, {"error": "서버에서 오류가 발생했어요."})

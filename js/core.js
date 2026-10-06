@@ -51,18 +51,25 @@ export const session = {
   clear() { localStorage.removeItem(SKEY); },
 };
 
-import { handleMockAPI } from './mock-storage.js';
+// ---------- 학급 코드 (웹 버전: 학생 이름은 학급 코드를 아는 기기에서만 보인다) ----------
+const CODE_KEY = 'cm_class_code';
+export const classCode = {
+  get() { try { return localStorage.getItem(CODE_KEY) || ''; } catch { return ''; } },
+  set(v) { try { localStorage.setItem(CODE_KEY, String(v || '').toUpperCase().replace(/[^0-9A-Z]/g, '')); } catch { /* 저장 안 됨 */ } },
+  clear() { try { localStorage.removeItem(CODE_KEY); } catch { /* 무시 */ } },
+};
 
-let isMockMode = null; // null: 아직 모름, true: 브라우저 저장소(체험 모드), false: 교실 서버
+let isMockMode = null; // null: 아직 모름, true: 브라우저 저장소(체험 모드), false: 서버(교실 PC 또는 Vercel + Neon)
 let modeProbe = null;
-// 서버가 없는 정적 호스팅 주소는 확인 없이 바로 체험 모드
-const STATIC_HOSTS = /(\.github\.io|\.vercel\.app|\.netlify\.app|\.pages\.dev)$/i;
+let mockApi = null;    // 체험 모드일 때만 불러온다 (서버 모드에서는 체험용 명단 파일을 받지 않게)
+// 서버 기능이 없는 정적 호스팅 주소는 확인 없이 바로 체험 모드 (Vercel은 /api 서버가 있어 확인한다)
+const STATIC_HOSTS = /(\.github\.io|\.netlify\.app|\.pages\.dev)$/i;
 
 export function getAppMode() {
   return isMockMode ? 'mock' : 'server';
 }
 
-/** 처음 한 번만 교실 서버가 있는지 확인한다. 한 번 정한 모드는 바꾸지 않는다. */
+/** 처음 한 번만 서버가 있는지 확인한다. 한 번 정한 모드는 바꾸지 않는다. */
 function detectMode() {
   if (isMockMode !== null) return Promise.resolve(isMockMode);
   if (location.protocol === 'file:' || STATIC_HOSTS.test(location.hostname)) {
@@ -70,14 +77,18 @@ function detectMode() {
     return Promise.resolve(true);
   }
   if (!modeProbe) {
-    modeProbe = fetch('/api/public/info', { headers: { Accept: 'application/json' } })
-      .then((r) => {
-        // 404나 index.html 같은 응답이면 서버가 없는 정적 호스팅
-        isMockMode = !(r.ok && (r.headers.get('content-type') || '').includes('application/json'));
+    modeProbe = fetch('/api/public/info', { headers: { Accept: 'application/json' }, cache: 'no-store' })
+      .then(async (r) => {
+        const isJson = (r.headers.get('content-type') || '').includes('application/json');
+        let data = null;
+        if (isJson) { try { data = await r.json(); } catch { data = null; } }
+        // 404·index.html 같은 응답이면 서버가 없는 정적 호스팅, DB가 아직 연결되지 않은 웹 서버도 체험 모드.
+        // 서버가 있는데 잠시 오류(5xx)면 체험 모드로 바꾸지 않는다 (기록이 서버와 브라우저로 나뉘지 않게)
+        isMockMode = isJson ? data?.code === 'DB_NOT_CONFIGURED' : r.status < 500;
       })
       .catch(() => { isMockMode = true; })
       .then(() => {
-        if (isMockMode) console.info('Classimal World: 교실 서버가 없어 체험 모드(이 브라우저에만 저장)로 작동합니다.');
+        if (isMockMode) console.info('Classimal World: 서버(데이터베이스)가 없어 체험 모드(이 브라우저에만 저장)로 작동합니다.');
       });
   }
   return modeProbe.then(() => isMockMode);
@@ -87,11 +98,14 @@ function detectMode() {
 export async function api(path, { method = 'GET', body } = {}) {
   const s = session.get();
   if (await detectMode()) {
-    return await handleMockAPI(path, { method, body, token: s?.token });
+    if (!mockApi) mockApi = (await import('./mock-storage.js')).handleMockAPI;
+    return await mockApi(path, { method, body, token: s?.token });
   }
 
   const headers = { 'Content-Type': 'application/json' };
   if (s?.token) headers.Authorization = `Bearer ${s.token}`;
+  const code = classCode.get();
+  if (code) headers['X-Class-Code'] = code;
   let res;
   try {
     res = await fetch(`/api${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
@@ -164,11 +178,12 @@ export function openModal({ title, body, foot = '', wide = false, onMount, onClo
 }
 
 // ---------- PDF 과제 ----------
-const MAX_PDF_BYTES = 5 * 1024 * 1024;
+// 웹(Vercel)은 한 번에 4.5MB까지만 주고받을 수 있어서, 글자로 바꾸면 4/3배가 되는 PDF는 3MB까지
+export const MAX_PDF_BYTES = 3 * 1024 * 1024;
 export async function readPdfFile(file) {
   if (!file) return { pdfName: '', pdfData: '' };
   if (!/\.pdf$/i.test(file.name)) throw new Error('PDF 파일을 선택해 주세요.');
-  if (file.size > MAX_PDF_BYTES) throw new Error('PDF는 5MB까지 올릴 수 있어요.');
+  if (file.size > MAX_PDF_BYTES) throw new Error('PDF는 3MB까지 올릴 수 있어요. 쪽수를 나누거나 용량을 줄여 주세요.');
   const signature = new TextDecoder().decode(await file.slice(0, 5).arrayBuffer());
   if (signature !== '%PDF-') throw new Error('올바른 PDF 파일인지 확인해 주세요.');
   const data = await new Promise((resolve, reject) => {

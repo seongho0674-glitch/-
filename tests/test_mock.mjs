@@ -170,14 +170,14 @@ await check('assignment answers require content, can retry rejection and earn re
   assert.equal(getLocalDB().submissions.find(s => s.id === 'duplicate_pending').status, 'rejected');
 });
 
-await check('PDF accepts the 5 MiB boundary and rejects one byte over it', async () => {
-  const bytes = Buffer.alloc(5 * 1024 * 1024, ' ');
+await check('PDF accepts the 3 MiB boundary and rejects one byte over it', async () => {
+  const bytes = Buffer.alloc(3 * 1024 * 1024, ' ');
   bytes.write('%PDF-1.4\n');
   const atLimit = `data:application/pdf;base64,${bytes.toString('base64')}`;
   const created = await teacherRequest('/teacher/assignments', 'POST', { title: '최대 크기 PDF', pdfName: 'large.pdf', pdfData: atLimit });
   assert.equal(created.assignment.hasPdf, true);
   const tooLarge = `data:application/pdf;base64,${Buffer.concat([bytes, Buffer.from(' ')]).toString('base64')}`;
-  await assert.rejects(teacherRequest('/teacher/assignments', 'POST', { title: '용량 초과', pdfName: 'over.pdf', pdfData: tooLarge }), /5MB/);
+  await assert.rejects(teacherRequest('/teacher/assignments', 'POST', { title: '용량 초과', pdfName: 'over.pdf', pdfData: tooLarge }), /3MB/);
   assert.equal(getLocalDB().assignments.length, 1);
 });
 

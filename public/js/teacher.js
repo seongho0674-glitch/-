@@ -27,6 +27,12 @@ const isPlus = (t) => t.type === 'give' || (t.type === 'luck' && t.win);
 export async function renderTeacher(app, view) {
   app.innerHTML = loadingHTML();
   let st = await api('/teacher/state');
+  // 웹 버전: 처음 PIN(0000)을 바꾸기 전에는 설정 화면부터 (서버도 다른 기능을 막아 둔다)
+  if (st.settings.mustChangePin && view !== 'settings') {
+    toast('먼저 선생님 PIN을 새로 정해 주세요.', 'error');
+    location.hash = '#/teacher/settings';
+    return null;
+  }
   let txs = ['history', 'shop'].includes(view) ? (await api('/teacher/transactions')).transactions : [];
   let worldData = view === 'world' ? (await api('/teacher/world')) : null;
   let ms = view === 'missions' ? (await api('/teacher/missions')) : null;
@@ -660,7 +666,8 @@ export async function renderTeacher(app, view) {
           <div class="stack">
             <div class="field"><label for="set-class">학급 이름</label><input class="input" id="set-class" maxlength="20" value="${esc(st.settings.className)}"></div>
             <div class="field"><label for="set-currency">화폐 이름</label><input class="input" id="set-currency" maxlength="10" value="${esc(st.settings.currencyName)}"></div>
-            <div class="field"><label for="set-pin">새 선생님 PIN (바꿀 때만 입력)</label><input class="input" id="set-pin" maxlength="4" inputmode="numeric" placeholder="숫자 4자리" autocomplete="off"></div>
+            <div class="field"><label for="set-pin">${st.settings.mustChangePin ? '🔐 새 선생님 PIN (꼭 입력)' : '새 선생님 PIN (바꿀 때만 입력)'}</label><input class="input" id="set-pin" maxlength="4" inputmode="numeric" placeholder="숫자 4자리" autocomplete="off">${st.settings.mustChangePin ? '<span class="hint">웹 주소는 누구나 열 수 있어서, 처음 PIN 0000을 바꿔야 다른 메뉴를 쓸 수 있어요.</span>' : ''}</div>
+            ${st.settings.cloud ? `<div class="field"><label for="set-code">학급 코드 (학생이 처음 한 번 입력)</label><input class="input" id="set-code" maxlength="8" autocomplete="off" value="${esc(st.settings.classCode || '')}" style="letter-spacing:4px;text-transform:uppercase"><span class="hint">영어 대문자·숫자 4~8자리. 코드를 아는 기기에서만 학생 이름 목록이 보여요.</span></div>` : ''}
             <div class="field">
               <label for="set-pe-days">🏃 자율 체육 목표 (며칠치를 모을까요?)</label>
               <input class="input" id="set-pe-days" type="number" min="1" max="60" value="${st.settings.peGoalDays ?? 10}" inputmode="numeric">
@@ -686,8 +693,8 @@ export async function renderTeacher(app, view) {
           </section>
           <section class="card">
             <div class="card-head"><h2 class="card-title">📱 학생 접속 주소</h2></div>
-            <p class="muted" style="font-size:14px;margin-bottom:10px">학생 태블릿·크롬북 인터넷 주소창에 아래 주소를 입력하세요. (같은 와이파이에 연결돼 있어야 해요)</p>
-            <div class="stack" style="gap:8px">${(st.addresses || []).map((a) => `<div class="server-link">${esc(a)}</div>`).join('') || '<div class="muted">주소를 찾지 못했어요. 서버 창에 표시된 주소를 확인해 주세요.</div>'}</div>
+            <p class="muted" style="font-size:14px;margin-bottom:10px">${st.settings.cloud ? '학생 태블릿·크롬북 인터넷 주소창에 아래 주소를 입력하고, 처음 한 번 학급 코드를 넣어요.' : '학생 태블릿·크롬북 인터넷 주소창에 아래 주소를 입력하세요. (같은 와이파이에 연결돼 있어야 해요)'}</p>
+            <div class="stack" style="gap:8px">${(st.addresses || []).map((a) => `<div class="server-link">${esc(a)}</div>`).join('') || '<div class="muted">주소를 찾지 못했어요. 서버 창에 표시된 주소를 확인해 주세요.</div>'}${st.settings.cloud && st.settings.classCode ? `<div class="server-link">학급 코드 <b style="letter-spacing:4px">${esc(st.settings.classCode)}</b></div>` : ''}</div>
           </section>
           <section class="card">
             <div class="card-head"><h2 class="card-title">💾 백업</h2></div>
@@ -739,8 +746,13 @@ export async function renderTeacher(app, view) {
         className: $('#set-class').value, currencyName: $('#set-currency').value, teacherPin: $('#set-pin').value.trim(),
         peGoalDays: $('#set-pe-days').value, luckEnabled: $('#set-luck').checked,
       };
-      try { await api('/teacher/settings', { method: 'PUT', body }); toast('설정을 저장했어요.'); await refresh(); }
-      catch (e) { toast(e.message, 'error'); }
+      if ($('#set-code')) body.classCode = $('#set-code').value.trim();
+      const wasLocked = st.settings.mustChangePin;
+      try {
+        await api('/teacher/settings', { method: 'PUT', body });
+        toast(wasLocked ? '새 PIN을 저장했어요. 이제 모든 메뉴를 쓸 수 있어요.' : '설정을 저장했어요.');
+        await refresh();
+      } catch (e) { toast(e.message, 'error'); }
     };
     $$('#roster tr[data-id]').forEach((tr) => {
       const s = st.students.find((x) => x.id === tr.dataset.id);
@@ -1016,7 +1028,7 @@ export async function renderTeacher(app, view) {
             <div class="field"><label for="assignment-title">과제 제목</label><input class="input" id="assignment-title" maxlength="100" required value="${esc(d.title)}" placeholder="예: 오늘의 수학 학습지"></div>
             <div class="field"><label for="assignment-reward">완료 보상 (${cur()})</label><input class="input" type="number" id="assignment-reward" min="1" max="1000" required value="${esc(d.reward)}"></div>
             <div class="field full"><label for="assignment-instructions">과제 내용 · 풀이 안내</label><textarea class="textarea" id="assignment-instructions" maxlength="3000" rows="6" placeholder="문제를 직접 적거나, PDF 학습지에서 풀 문제와 답안을 적는 방법을 안내해 주세요.">${esc(d.instructions)}</textarea></div>
-            <div class="field full"><label for="assignment-pdf">PDF 학습지 업로드</label><input class="input" id="assignment-pdf" type="file" accept="application/pdf,.pdf" ${readingPdf ? 'disabled' : ''}><p class="hint">PDF 파일은 5MB까지 올릴 수 있어요. 학생은 과제 화면에서 바로 열어 문제를 보고 답안을 제출해요.</p><div id="assignment-file-status">${assignmentFileHTML()}</div></div>
+            <div class="field full"><label for="assignment-pdf">PDF 학습지 업로드</label><input class="input" id="assignment-pdf" type="file" accept="application/pdf,.pdf" ${readingPdf ? 'disabled' : ''}><p class="hint">PDF 파일은 3MB까지 올릴 수 있어요. 학생은 과제 화면에서 바로 열어 문제를 보고 답안을 제출해요.</p><div id="assignment-file-status">${assignmentFileHTML()}</div></div>
             <div class="field full"><label for="assignment-target">과제를 받을 학생</label><select class="select" id="assignment-target"><option value="all" ${d.target === 'all' ? 'selected' : ''}>우리 반 전체</option><option value="selected" ${d.target === 'selected' ? 'selected' : ''}>선택한 학생</option></select></div>
             <div class="field full ${d.target === 'all' ? 'hidden' : ''}" id="assignment-students"><div class="chips">${st.students.map((s) => `<label class="chip"><input type="checkbox" class="chk" data-assignment-student="${esc(s.id)}" ${d.studentIds.includes(s.id) ? 'checked' : ''}> ${s.number}. ${esc(s.name)}</label>`).join('')}</div>${st.students.length ? '' : '<p class="hint">설정에서 학생을 먼저 추가해 주세요.</p>'}</div>
           </div>
