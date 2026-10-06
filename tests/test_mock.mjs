@@ -39,6 +39,25 @@ async function check(name, run) {
   console.log(`PASS ${name}`);
 }
 
+await check('class name updates once while all classroom records remain intact', async () => {
+  assert.equal(createDefaultDB().settings.className, '6학년 4반');
+  const legacy = createDefaultDB();
+  legacy.settings.className = '6학년 1반';
+  delete legacy.settings.classNameVersion;
+  legacy.students[0].balance = 789;
+  legacy.students[0].pin = '9876';
+  legacy.assignments.push({ id: 'saved_assignment', title: '기존 학습지', pdfData: pdf, studentIds: ['s_1'] });
+  legacy.submissions.push({ id: 'saved_submission', studentId: 's_1', answer: '기존 답안', status: 'pending' });
+  const expected = structuredClone(legacy);
+  expected.settings.className = '6학년 4반';
+  expected.settings.classNameVersion = 1;
+  saveLocalDB(legacy);
+  assert.deepEqual(getLocalDB(), expected);
+  expected.settings.className = '경제 교실';
+  saveLocalDB(expected);
+  assert.deepEqual(getLocalDB(), expected, 'later teacher edits are preserved on reload');
+});
+
 await check('new shop seeds and legacy migration preserve class records', async () => {
   const seeded = getLocalDB();
   assert.equal(seeded.version, 3);

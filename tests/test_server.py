@@ -79,6 +79,24 @@ class ServerTests(unittest.TestCase):
         with response:
             return response.code, json.loads(response.read())
 
+    def test_class_name_updates_once_and_preserves_all_classroom_records(self):
+        self.assertEqual(app.seed_db()["settings"]["className"], "6학년 4반")
+        legacy = copy.deepcopy(app.DB)
+        legacy["settings"]["className"] = "6학년 1반"
+        legacy["settings"].pop("classNameVersion", None)
+        legacy["students"][0]["balance"] = 789
+        legacy["students"][0]["pin"] = "9876"
+        legacy["assignments"].append({"id": "saved_assignment", "title": "기존 학습지", "pdfData": "saved PDF"})
+        legacy["submissions"].append({"id": "saved_submission", "studentId": self.student["id"], "answer": "기존 답안"})
+        expected = copy.deepcopy(legacy)
+        expected["settings"].update({"className": "6학년 4반", "classNameVersion": 1})
+        self.assertTrue(app.migrate_db(legacy))
+        self.assertEqual(legacy, expected)
+        legacy["settings"]["className"] = "경제 교실"
+        expected["settings"]["className"] = "경제 교실"
+        self.assertFalse(app.migrate_db(legacy))
+        self.assertEqual(legacy, expected)
+
     def test_shop_migration_preserves_ids_and_history_and_runs_once(self):
         db = copy.deepcopy(app.DB)
         db["version"] = 2

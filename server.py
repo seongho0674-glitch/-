@@ -160,7 +160,7 @@ def seed_db():
     ]
     db = {
         "version": 3,
-        "settings": {"className": "6학년 1반", "currencyName": "코인", "teacherPin": "0000",
+        "settings": {"className": "6학년 4반", "classNameVersion": 1, "currencyName": "코인", "teacherPin": "0000",
                      "luckEnabled": True, "peGoalDays": 10},
         "students": students,
         "roles": roles,
@@ -220,6 +220,10 @@ def migrate_db(db):
     """예전 데이터에 새 기능 칸을 채우고(지우는 것 없음), 기본 상품 가격을 한 번 정리합니다."""
     changed = False
     st = db.setdefault("settings", {})
+    if int(st.get("classNameVersion", 0)) < 1:
+        st["className"] = "6학년 4반"
+        st["classNameVersion"] = 1
+        changed = True
     for key, value in (("luckEnabled", True), ("peGoalDays", 10)):
         if key not in st:
             st[key] = value

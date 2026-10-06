@@ -101,6 +101,11 @@ function seedMissions() {
 function migrateDB(db) {
   let changed = false;
   db.settings = db.settings || {};
+  if (Number(db.settings.classNameVersion || 0) < 1) {
+    db.settings.className = '6학년 4반';
+    db.settings.classNameVersion = 1;
+    changed = true;
+  }
   if (!('luckEnabled' in db.settings)) { db.settings.luckEnabled = true; changed = true; }
   if (!('peGoalDays' in db.settings)) { db.settings.peGoalDays = 10; changed = true; }
   if (!Array.isArray(db.missions)) { db.missions = seedMissions(); changed = true; }
@@ -217,7 +222,8 @@ export function createDefaultDB() {
   return {
     version: 3,
     settings: {
-      className: "6학년 1반",
+      className: "6학년 4반",
+      classNameVersion: 1,
       currencyName: "코인",
       teacherPin: "0000",
       rosterVersion: 1,
