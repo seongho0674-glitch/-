@@ -97,6 +97,19 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(app.migrate_db(legacy))
         self.assertEqual(legacy, expected)
 
+    def test_student_first_pin_is_0000_and_old_default_moves_once(self):
+        self.assertTrue(all(s["pin"] == "0000" for s in app.seed_db()["students"]))
+        legacy = copy.deepcopy(app.DB)
+        legacy["settings"].pop("pinDefaultVersion", None)
+        legacy["students"][0]["pin"] = "1234"   # 예전 기본값
+        legacy["students"][1]["pin"] = "5678"   # 선생님이 정해 준 PIN은 그대로
+        self.assertTrue(app.migrate_db(legacy))
+        self.assertEqual([legacy["students"][0]["pin"], legacy["students"][1]["pin"]], ["0000", "5678"])
+        self.assertEqual(legacy["settings"]["teacherPin"], "0000")
+        legacy["students"][0]["pin"] = "1234"   # 그 뒤에 일부러 1234로 정하면 다시 바꾸지 않는다
+        self.assertFalse(app.migrate_db(legacy))
+        self.assertEqual(legacy["students"][0]["pin"], "1234")
+
     def test_shop_migration_preserves_ids_and_history_and_runs_once(self):
         db = copy.deepcopy(app.DB)
         db["version"] = 2
@@ -141,7 +154,7 @@ class ServerTests(unittest.TestCase):
         with open(roster_path, "w", encoding="utf-8") as file:
             json.dump(roster, file)
         def pupil(_id, number, name, **extra):
-            return {"id": _id, "number": number, "name": name, "pin": "1234", "balance": 0, "exp": 0, "roleId": None, **extra}
+            return {"id": _id, "number": number, "name": name, "pin": "0000", "balance": 0, "exp": 0, "roleId": None, **extra}
         db = {"settings": {}, "students": [
             pupil("named", 9, "가나다", balance=55, exp=75, pin="4567"), pupil("second", 2, "2번 학생"),
             pupil("empty", 3, "3번 학생"), pupil("history", 4, "4번 학생"), pupil("money", 5, "5번 학생", balance=1),
@@ -326,7 +339,7 @@ class ServerTests(unittest.TestCase):
         code, login = self.request("POST", "/api/login/teacher", {"pin": "0000"})
         self.assertEqual(code, 200)
         teacher = login["token"]
-        code, login = self.request("POST", "/api/login/student", {"studentId": self.student["id"], "pin": "1234"})
+        code, login = self.request("POST", "/api/login/student", {"studentId": self.student["id"], "pin": "0000"})
         self.assertEqual(code, 200)
         student = login["token"]
         self.assertEqual(self.request("GET", "/api/teacher/assignments", token=student)[0], 401)

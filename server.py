@@ -42,6 +42,8 @@ STORAGE = (os.environ.get("CLASS_ECONOMY_STORAGE") or "file").strip().lower()
 CLOUD = STORAGE == "postgres"
 SESSION_DAYS = 30                 # 웹 버전 로그인 유지 기간
 DEFAULT_TEACHER_PIN = "0000"
+DEFAULT_STUDENT_PIN = "0000"     # 학생 첫 PIN (선생님 첫 PIN과 같게 통일)
+LEGACY_STUDENT_PIN = "1234"      # 예전 학생 기본 PIN
 CLASS_CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # 헷갈리는 0·O·1·I·L 제외
 
 # 한국 시간(서머타임 없음). Vercel 서버는 UTC라서 그대로 두면 '오늘'이 아침 9시에 바뀐다.
@@ -134,7 +136,7 @@ def apply_class_roster(db):
             student = next((s for s in students if s.get("id") not in matched_ids
                             and s.get("number") == record["number"] and re.fullmatch(r"\d+번 학생", s.get("name", ""))), None)
         if not student:
-            student = {"id": new_id("s"), "pin": "1234", "balance": 0, "exp": 0, "createdAt": now_str()}
+            student = {"id": new_id("s"), "pin": DEFAULT_STUDENT_PIN, "balance": 0, "exp": 0, "createdAt": now_str()}
             students.append(student)
         student.update({"number": record["number"], "name": record["name"], "roleId": record.get("roleId")})
         matched_ids.add(student["id"])
@@ -144,7 +146,7 @@ def apply_class_roster(db):
         s["id"] not in matched_ids and s.get("number") not in configured_numbers
         and re.fullmatch(r"\d+번 학생", s.get("name", ""))
         and not s.get("balance") and not s.get("exp")
-        and not s.get("roleId") and s.get("pin", "1234") == "1234"
+        and not s.get("roleId") and s.get("pin", DEFAULT_STUDENT_PIN) in (LEGACY_STUDENT_PIN, DEFAULT_STUDENT_PIN)
         and int(s.get("characterLevel", 1)) <= 1 and not s.get("territoryPurchases")
         and len(s.get("claimedCities", [])) <= 1 and int(s.get("claimedTiles", 6)) <= 6
         and not has_student_reference(other_data, s["id"]))]
@@ -187,13 +189,14 @@ def seed_db():
         for e, n, t, p, d in items_seed
     ]
     students = [
-        {"id": new_id("s"), "number": i, "name": f"{i}번 학생", "pin": "1234",
+        {"id": new_id("s"), "number": i, "name": f"{i}번 학생", "pin": DEFAULT_STUDENT_PIN,
          "balance": 0, "exp": 0, "roleId": None, "createdAt": now_str()}
         for i in range(1, 26)
     ]
     db = {
         "version": 3,
         "settings": {"className": "6학년 4반", "classNameVersion": 1, "currencyName": "코인", "teacherPin": "0000",
+                     "pinDefaultVersion": 1,
                      "luckEnabled": True, "peGoalDays": 10},
         "students": students,
         "roles": roles,
@@ -298,6 +301,19 @@ def migrate_db(db):
         if not any(m.get("id") == "m_teacher" for m in db["missions"]):
             db["missions"].append(next(m for m in seed_missions() if m["id"] == "m_teacher"))
         db["version"] = 3
+        changed = True
+    if int(st.get("pinDefaultVersion", 0)) < 1:
+        # 학생 첫 PIN을 0000으로 통일: 예전 기본값(1234) 그대로인 학생만 바꾼다 (한 번만)
+        for s in db.get("students", []):
+            if str(s.get("pin")) == LEGACY_STUDENT_PIN:
+                s["pin"] = DEFAULT_STUDENT_PIN
+        st["pinDefaultVersion"] = 1
+        changed = True
+    if CLOUD and int(st.get("cloudPinReset", 0)) < 1:
+        # 웹 버전 첫 배포 때 무작위로 정했던 학생 PIN을 0000으로 맞춘다 (한 번만)
+        for s in db.get("students", []):
+            s["pin"] = DEFAULT_STUDENT_PIN
+        st["cloudPinReset"] = 1
         changed = True
     if apply_class_roster(db):
         changed = True
@@ -1279,6 +1295,7 @@ def api_restore(ctx):
         # 웹 버전: 지금 PIN·학급 코드는 그대로 둔다 (예전 백업의 0000으로 되돌아가 잠기지 않게)
         keep = {k: DB["settings"].get(k) for k in ("teacherPin", "classCode") if DB["settings"].get(k)}
         data.setdefault("settings", {}).update(keep)
+        data["settings"]["cloudPinReset"] = 1
     DB = data
     migrate_db(DB)              # 예전 백업에도 미션·학급 회의 칸을 채움
     ensure_student_fields(DB)   # 예전 백업에도 수호동물·도시 정보를 채움
@@ -1958,12 +1975,11 @@ def pg_reset():
 
 
 def seed_cloud_db():
-    """웹 버전 첫 실행: 명부로 학급을 만들고 학생 PIN은 무작위 4자리, 학급 코드는 새로 정한다."""
+    """웹 버전 첫 실행: 명부로 학급을 만들고(학생 첫 PIN 0000), 학급 코드는 새로 정한다."""
     db = seed_db()
     ensure_student_fields(db)
-    for s in db["students"]:
-        s["pin"] = f"{secrets.randbelow(10000):04d}"
     db["settings"]["classCode"] = new_class_code()
+    db["settings"]["cloudPinReset"] = 1
     return db
 
 
@@ -2069,9 +2085,12 @@ def run_cloud(fn, need, ctx, method):
 
 def db_region():
     """Neon 주소에서 지역 이름만 꺼낸다 (예: ap-southeast-1). 비밀번호·주소는 내보내지 않는다."""
-    try:
+    try:   # 예: ep-xxx-pooler.c-4.ap-southeast-1.aws.neon.tech → ap-southeast-1 (aws)
         parts = (urlparse(DATABASE_URL).hostname or "").split(".")
-        return f"{parts[1]} ({parts[2]})" if len(parts) >= 5 and parts[-2:] == ["neon", "tech"] else ""
+        if parts[-2:] != ["neon", "tech"]:
+            return ""
+        cloud = next(i for i, p in enumerate(parts) if p in ("aws", "azure"))
+        return f"{parts[cloud - 1]} ({parts[cloud]})"
     except Exception:
         return ""
 

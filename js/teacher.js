@@ -731,7 +731,7 @@ export async function renderTeacher(app, view) {
               <tr>
                 <td><input class="input" id="new-num" type="number" min="1" max="99" value="${(Math.max(0, ...st.students.map((s) => s.number)) + 1)}" aria-label="새 학생 번호" style="height:38px"></td>
                 <td><input class="input" id="new-name" maxlength="12" placeholder="새 학생 이름" aria-label="새 학생 이름" style="height:38px"></td>
-                <td><input class="input" id="new-pin" maxlength="4" inputmode="numeric" value="1234" aria-label="새 학생 PIN" style="height:38px;letter-spacing:4px"></td>
+                <td><input class="input" id="new-pin" maxlength="4" inputmode="numeric" value="0000" aria-label="새 학생 PIN" style="height:38px;letter-spacing:4px"></td>
                 <td class="faint">처음 0 ${cur()} · Lv.1</td>
                 <td><div class="act-cell"><button class="btn btn-primary btn-sm" id="new-add">＋ 학생 추가</button></div></td>
               </tr>

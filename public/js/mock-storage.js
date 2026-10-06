@@ -58,6 +58,8 @@ const ANIMALS_PRESETS = [
 ];
 
 const DB_KEY = 'classimal_offline_db_v1';
+const DEFAULT_PIN = '0000';   // 선생님·학생 첫 PIN (통일)
+const LEGACY_STUDENT_PIN = '1234';
 
 function uid(p = 'id') {
   return `${p}_${Math.random().toString(36).substring(2, 10)}`;
@@ -149,6 +151,12 @@ function migrateDB(db) {
     db.settings.rosterVersion = 1;
     changed = true;
   }
+  if (Number(db.settings.pinDefaultVersion || 0) < 1) {
+    // 학생 첫 PIN을 0000으로 통일 (예전 기본값 1234 그대로인 학생만, 한 번만)
+    for (const s of db.students || []) if (String(s.pin) === LEGACY_STUDENT_PIN) s.pin = DEFAULT_PIN;
+    db.settings.pinDefaultVersion = 1;
+    changed = true;
+  }
   return changed;
 }
 
@@ -156,7 +164,7 @@ function makeRosterStudent(entry, idx) {
   const p = ANIMALS_PRESETS[idx % ANIMALS_PRESETS.length];
   const city = CITIES_DATA[idx % CITIES_DATA.length];
   return {
-    id: `s_${entry.number}`, number: entry.number, name: entry.name, pin: '1234',
+    id: `s_${entry.number}`, number: entry.number, name: entry.name, pin: DEFAULT_PIN,
     balance: 100, exp: 150, characterLevel: 1, territoryPurchases: 0,
     roleId: entry.roleId, createdAt: nowStr(),
     animal: { name: p.name, species: p.species, emoji: p.emoji, title: p.title },
@@ -227,6 +235,7 @@ export function createDefaultDB() {
       currencyName: "코인",
       teacherPin: "0000",
       rosterVersion: 1,
+      pinDefaultVersion: 1,
       luckEnabled: true,
       peGoalDays: 10
     },
@@ -472,8 +481,8 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     const { studentId, pin } = body || {};
     const s = findStudent(studentId);
     if (!s) throw new Error('학생을 찾을 수 없어요.');
-    if (String(s.pin) !== String(pin) && String(pin) !== '1234') {
-      throw new Error('PIN 번호가 일치하지 않아요. (기본 PIN: 1234)');
+    if (String(s.pin) !== String(pin) && String(pin) !== DEFAULT_PIN) {
+      throw new Error('PIN 번호가 일치하지 않아요. (처음 PIN: 0000)');
     }
     const token = `s_token_${s.id}`;
     return {
@@ -1016,7 +1025,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
       id: uid('s'),
       number: num,
       name: body.name || `${num}번 학생`,
-      pin: body.pin || '1234',
+      pin: body.pin || DEFAULT_PIN,
       balance: 100,
       exp: 150,
       characterLevel: 1,

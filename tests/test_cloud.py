@@ -137,17 +137,37 @@ class CloudStorageTests(unittest.TestCase):
         return res["token"], st
 
     # ---------- 검사 ----------
-    def test_first_request_seeds_roster_with_random_pins_and_class_code(self):
+    def test_first_request_seeds_roster_with_0000_pins_and_class_code(self):
         code, info = self.request(self.url_a, "GET", "/api/public/info")
         self.assertEqual(code, 200, info)
         self.assertEqual(info["students"], [])
         self.assertTrue(info["needCode"])
         db = self.state()
         self.assertEqual(len(db["students"]), 21)
-        self.assertTrue(all(len(s["pin"]) == 4 and s["pin"].isdigit() for s in db["students"]))
-        self.assertGreater(len({s["pin"] for s in db["students"]}), 1)
+        self.assertEqual({s["pin"] for s in db["students"]}, {"0000"})
         self.assertRegex(db["settings"]["classCode"], r"^[A-Z0-9]{6}$")
         self.assertEqual(db["settings"]["teacherPin"], "0000")
+
+    def test_earlier_random_pins_become_0000_once(self):
+        self.class_code()
+        teacher = self.ready_teacher()
+        from psycopg.types.json import Jsonb
+        with psycopg.connect(TEST_URL, autocommit=True) as conn:   # 첫 배포 때처럼 무작위 PIN, 정리 표시 없음
+            db = conn.execute("SELECT data FROM app_state WHERE id = 1").fetchone()[0]
+            for i, s in enumerate(db["students"]):
+                s["pin"] = f"{(i * 37 + 1001) % 10000:04d}"
+            db["settings"].pop("cloudPinReset", None)
+            conn.execute("UPDATE app_state SET data = %s, version = version + 1, updated_at = now() WHERE id = 1",
+                         (Jsonb(db),))
+        status, st = self.request(self.url_b, "GET", "/api/teacher/state", token=teacher)
+        self.assertEqual(status, 200, st)
+        self.assertEqual({s["pin"] for s in st["students"]}, {"0000"})
+        self.assertEqual(self.state()["settings"]["teacherPin"], "4826")   # 선생님 PIN은 그대로
+        first = st["students"][0]
+        body = {"number": first["number"], "name": first["name"], "pin": "2580"}
+        self.assertEqual(self.request(self.url_a, "PUT", f"/api/teacher/students/{first['id']}", body, teacher)[0], 200)
+        self.request(self.url_b, "GET", "/api/teacher/state", token=teacher)
+        self.assertEqual(self.state()["students"][0]["pin"], "2580")   # 한 번만 정리하고, 그 뒤 바꾼 PIN은 유지
 
     def test_class_code_unlocks_names_and_is_case_insensitive(self):
         code_value = self.class_code()
@@ -261,6 +281,7 @@ class CloudStorageTests(unittest.TestCase):
         backup["settings"]["teacherPin"] = "0000"
         backup["settings"].pop("classCode", None)
         backup["students"][0]["balance"] = 321
+        backup["students"][1]["pin"] = "4321"
         backup["assignments"] = [{"id": "a_restored", "title": "예전 학습지", "instructions": "", "reward": 5,
                                   "studentIds": [], "pdfName": "old.pdf", "pdfData": data_url, "active": True,
                                   "createdAt": "2026-10-01T09:00:00"}]
@@ -270,6 +291,7 @@ class CloudStorageTests(unittest.TestCase):
         self.assertEqual(db["settings"]["teacherPin"], "4826")
         self.assertEqual(db["settings"]["classCode"], code_before)
         self.assertEqual(db["students"][0]["balance"], 321)
+        self.assertEqual(db["students"][1]["pin"], "4321")   # 백업에 든 학생 PIN은 그대로
         self.assertEqual(db["assignments"][0]["pdfData"], "neon:a_restored")
         self.assertEqual(self.sql("SELECT count(*) FROM app_pdfs WHERE assignment_id = 'a_restored'")[0][0], 1)
 

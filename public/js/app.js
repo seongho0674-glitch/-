@@ -81,7 +81,7 @@ async function renderStart() {
           </a>
         </div>
         ${getAppMode() === 'mock' ? `
-          <p class="mode-note" role="note">🧪 <b>체험 모드</b> · 기록은 이 브라우저에만 저장돼요. 교실에서 함께 쓰려면 교실 PC에서 <b>실행하기.bat</b>으로 서버를 켜 주세요. (선생님 PIN 0000 · 학생 PIN 1234)</p>` : ''}
+          <p class="mode-note" role="note">🧪 <b>체험 모드</b> · 기록은 이 브라우저에만 저장돼요. 교실에서 함께 쓰려면 교실 PC에서 <b>실행하기.bat</b>으로 서버를 켜 주세요. (선생님·학생 처음 PIN 0000)</p>` : ''}
       </div>
     </section>`;
 

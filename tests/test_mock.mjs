@@ -90,8 +90,8 @@ await check('roster has 21 students and roles, migration preserves balances and 
   const seeded = getLocalDB();
   assert.equal(seeded.students.length, 21);
   assert.equal(seeded.roles.length, 21);
-  assert.equal(seeded.students[0].name, '김도형');
-  assert.equal(seeded.students[20].name, '최건호');
+  assert.equal(seeded.students[0].name, '1번 학생');   // 체험 모드는 예시 이름 (실제 명단은 서버 전용)
+  assert.equal(seeded.students[20].name, '21번 학생');
   assert.equal(seeded.roles.find(r => r.id === seeded.students[0].roleId).name, '안전부 차관');
   const legacy = createDefaultDB();
   delete legacy.settings.rosterVersion;
@@ -105,7 +105,7 @@ await check('roster has 21 students and roles, migration preserves balances and 
   legacy.transactions.push({ id: 'record', studentId: 's_24', studentName: '24번 학생', type: 'give', amount: 1 });
   saveLocalDB(legacy);
   const migrated = getLocalDB();
-  assert.equal(migrated.students.find(s => s.id === 's_1').name, '김도형');
+  assert.equal(migrated.students.find(s => s.id === 's_1').name, '1번 학생');
   assert.equal(migrated.students.find(s => s.id === 's_1').balance, 567);
   assert.equal(migrated.students.some(s => s.id === 's_22'), false);
   assert.equal(migrated.students.some(s => s.id === 's_23'), true);
@@ -296,6 +296,21 @@ await check('failed storage writes never persist partial spending or assignment 
   assert.equal(result.student.balance, 90);
   assert.equal(result.student.characterLevel, 2);
   assert.equal(getLocalDB().assignments.length, 0);
+});
+
+await check('student first PIN is 0000 and old 1234 defaults move to 0000 once', async () => {
+  assert.ok(getLocalDB().students.every(s => s.pin === '0000'));
+  const legacy = createDefaultDB();
+  delete legacy.settings.pinDefaultVersion;
+  legacy.students[0].pin = '1234';
+  legacy.students[1].pin = '5678';
+  saveLocalDB(legacy);
+  const migrated = getLocalDB();
+  assert.equal(migrated.students[0].pin, '0000');
+  assert.equal(migrated.students[1].pin, '5678');
+  const login = await api('/login/student', { method: 'POST', body: { studentId: migrated.students[0].id, pin: '0000' } });
+  assert.equal(login.role, 'student');
+  await assert.rejects(api('/login/student', { method: 'POST', body: { studentId: migrated.students[1].id, pin: '1234' } }), /처음 PIN: 0000/);
 });
 
 console.log(`\n${checks} mock API integration checks passed.`);

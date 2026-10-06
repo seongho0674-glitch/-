@@ -8,7 +8,10 @@ const { PDFDocument, StandardFonts } = require(path.join(runtimeModules, 'pdf-li
 const stage = path.resolve(__dirname, '..');
 const qa = path.join(stage, 'qa');
 fs.mkdirSync(qa, { recursive: true });
-const expectedNames = ['김도형', '김민준', '김소윤', '박은우', '박주이', '백채윤', '서하진', '서현아', '신윤호', '안수빈', '엄초원', '원예랑', '윤지은', '이건우', '이서우', '이서윤', '이정우', '이청한', '임진우', '조아란', '최건호'];
+// 교실 서버는 저장소 루트 class-roster.json(실제 명단), 체험 모드는 예시 이름을 쓴다
+const rosterNames = JSON.parse(fs.readFileSync(path.join(stage, 'class-roster.json'), 'utf8').replace(/^\uFEFF/, '')).students.map(s => s.name);
+const demoNames = Array.from({ length: 21 }, (_, i) => `${i + 1}번 학생`);
+let expectedNames = rosterNames;
 const modes = process.argv.includes('--mock-only') ? ['mock'] : process.argv.includes('--server-only') ? ['server'] : ['mock', 'server'];
 const report = { startedAt: new Date().toISOString(), modes: [], pageErrors: [] };
 let browser;
@@ -66,7 +69,7 @@ async function signIn(page, base, role, studentId) {
     await page.locator(`#pick-${studentId}`).click();
   }
   await page.locator('#pin-key-0').waitFor();
-  for (const digit of role === 'teacher' ? '0000' : '1234') await page.locator(`#pin-key-${digit}`).click();
+  for (const digit of '0000') await page.locator(`#pin-key-${digit}`).click();
   await page.locator('#btn-logout').waitFor();
 }
 
@@ -94,6 +97,7 @@ async function confirmedClick(page, selector) {
 }
 
 async function runMode(mode, pdfFile) {
+  expectedNames = mode === 'mock' ? demoNames : rosterNames;
   const base = mode === 'mock' ? 'http://127.0.0.1:8766/' : 'http://127.0.0.1:8765/';
   const result = { mode, base, checks: [], passed: false };
   report.modes.push(result);

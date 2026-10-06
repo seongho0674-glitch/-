@@ -1,109 +1,110 @@
-// 학급 명부와 1인 1역 기본 배정 (교사 화면에서 이후 수정 가능)
+// 체험 모드(서버 없이 브라우저에만 저장)용 예시 명단과 1인 1역 기본 배정입니다.
+// 실제 학생 이름은 공개되는 이 파일에 두지 않고, 저장소 루트의 class-roster.json(서버 전용)에만 둡니다.
 export const CLASS_ROSTER = {
   "students": [
     {
       "number": 1,
-      "name": "김도형",
+      "name": "1번 학생",
       "roleId": "r_class_01"
     },
     {
       "number": 2,
-      "name": "김민준",
+      "name": "2번 학생",
       "roleId": "r_class_02"
     },
     {
       "number": 3,
-      "name": "김소윤",
+      "name": "3번 학생",
       "roleId": "r_class_03"
     },
     {
       "number": 4,
-      "name": "박은우",
+      "name": "4번 학생",
       "roleId": "r_class_04"
     },
     {
       "number": 5,
-      "name": "박주이",
+      "name": "5번 학생",
       "roleId": "r_class_05"
     },
     {
       "number": 6,
-      "name": "백채윤",
+      "name": "6번 학생",
       "roleId": "r_class_06"
     },
     {
       "number": 7,
-      "name": "서하진",
+      "name": "7번 학생",
       "roleId": "r_class_07"
     },
     {
       "number": 8,
-      "name": "서현아",
+      "name": "8번 학생",
       "roleId": "r_class_08"
     },
     {
       "number": 9,
-      "name": "신윤호",
+      "name": "9번 학생",
       "roleId": "r_class_09"
     },
     {
       "number": 10,
-      "name": "안수빈",
+      "name": "10번 학생",
       "roleId": "r_class_10"
     },
     {
       "number": 11,
-      "name": "엄초원",
+      "name": "11번 학생",
       "roleId": "r_class_11"
     },
     {
       "number": 12,
-      "name": "원예랑",
+      "name": "12번 학생",
       "roleId": "r_class_12"
     },
     {
       "number": 13,
-      "name": "윤지은",
+      "name": "13번 학생",
       "roleId": "r_class_13"
     },
     {
       "number": 14,
-      "name": "이건우",
+      "name": "14번 학생",
       "roleId": "r_class_14"
     },
     {
       "number": 15,
-      "name": "이서우",
+      "name": "15번 학생",
       "roleId": "r_class_15"
     },
     {
       "number": 16,
-      "name": "이서윤",
+      "name": "16번 학생",
       "roleId": "r_class_16"
     },
     {
       "number": 17,
-      "name": "이정우",
+      "name": "17번 학생",
       "roleId": "r_class_17"
     },
     {
       "number": 18,
-      "name": "이청한",
+      "name": "18번 학생",
       "roleId": "r_class_18"
     },
     {
       "number": 19,
-      "name": "임진우",
+      "name": "19번 학생",
       "roleId": "r_class_19"
     },
     {
       "number": 20,
-      "name": "조아란",
+      "name": "20번 학생",
       "roleId": "r_class_20"
     },
     {
       "number": 21,
-      "name": "최건호",
+      "name": "21번 학생",
       "roleId": "r_class_21"
     }
   ],
@@ -204,7 +205,7 @@ export const CLASS_ROSTER = {
         "급식 도우미 맡기",
         "물품 배송하기",
         "칠판 지우기",
-        "주이 도우미 맡기"
+        "친구 도우미 맡기"
       ]
     },
     {
@@ -213,7 +214,7 @@ export const CLASS_ROSTER = {
       "name": "환경 1부 차관",
       "tasks": [
         "아지트 청소 함께하기",
-        "아지트 청소를 주로 맡는 최건호 돕기"
+        "아지트 청소를 주로 맡는 환경 1부 장관 돕기"
       ]
     },
     {
@@ -256,7 +257,7 @@ export const CLASS_ROSTER = {
       "name": "환경 1부 차관",
       "tasks": [
         "아지트 청소 함께하기",
-        "아지트 청소를 주로 맡는 최건호 돕기"
+        "아지트 청소를 주로 맡는 환경 1부 장관 돕기"
       ]
     },
     {
@@ -308,7 +309,7 @@ export const CLASS_ROSTER = {
       "name": "환경 1부 차관",
       "tasks": [
         "아지트 청소 함께하기",
-        "아지트 청소를 주로 맡는 최건호 돕기"
+        "아지트 청소를 주로 맡는 환경 1부 장관 돕기"
       ]
     },
     {
