@@ -82,10 +82,19 @@ class CloudStorageTests(unittest.TestCase):
             module.pg_reset()
 
     def setUp(self):
+        # 시각을 9시 전으로 고정: 소득세 자동 납부가 다른 검사의 잔액 계산에 끼어들지 않게
+        self.clock = [datetime(2026, 10, 6, 8, 30)]
+        self.patches = [patch.object(m, "local_now", side_effect=lambda: self.clock[0]) for m in (self.a, self.b)]
+        for item in self.patches:
+            item.start()
         for module in (self.a, self.b):
             module.pg_reset()
         with psycopg.connect(TEST_URL, autocommit=True) as conn:
             conn.execute("DROP TABLE IF EXISTS app_state, app_sessions, app_login_failures, app_pdfs")
+
+    def tearDown(self):
+        for item in self.patches:
+            item.stop()
 
     # ---------- 도우미 ----------
     def request(self, base, method, path, body=None, token=None, code=None, host=None):
@@ -301,11 +310,28 @@ class CloudStorageTests(unittest.TestCase):
         self.assertEqual(self.request(self.url_b, "DELETE", f"/api/teacher/students/{st['id']}", token=teacher)[0], 200)
         self.assertEqual(self.request(self.url_a, "GET", "/api/student/me", token=token)[0], 401)
 
-    def test_dates_use_korean_time(self):
-        kst = datetime.now(timezone(timedelta(hours=9))).replace(tzinfo=None)
-        stamp = datetime.fromisoformat(self.a.now_str())
-        self.assertLess(abs((stamp - kst).total_seconds()), 5)
-        self.assertEqual(self.a.today_str(), kst.strftime("%Y-%m-%d"))
+    def test_dates_use_korean_time_and_day_starts_at_eight(self):
+        for item in self.patches:
+            item.stop()
+        try:
+            kst = datetime.now(timezone(timedelta(hours=9))).replace(tzinfo=None)
+            stamp = datetime.fromisoformat(self.a.now_str())
+            self.assertLess(abs((stamp - kst).total_seconds()), 5)
+            self.assertEqual(self.a.today_str(), (kst - timedelta(hours=8)).strftime("%Y-%m-%d"))
+        finally:
+            for item in self.patches:
+                item.start()
+
+    def test_income_tax_from_a_read_request_is_saved_once(self):
+        token, st = self.student_login(self.url_a)            # 8:30 접속 기록
+        self.assertEqual(self.request(self.url_b, "GET", "/api/student/me", token=token)[1]["taxInfo"]["incomeStatus"], "scheduled")
+        self.clock[0] = datetime(2026, 10, 6, 9, 20)
+        for base in (self.url_a, self.url_b, self.url_a):       # 여러 서버가 읽기 요청을 받아도 한 번만 걷는다
+            status, me = self.request(base, "GET", "/api/student/me", token=token)
+            self.assertEqual(status, 200, me)
+        self.assertEqual(me["student"]["balance"], -10)
+        taxes = [t for t in self.state()["transactions"] if t["type"] == "tax"]
+        self.assertEqual([(t["studentId"], t["createdAt"]) for t in taxes], [(st["id"], "2026-10-06T09:00:00")])
 
     def test_health_and_missing_database(self):
         status, info = self.request(self.url_a, "GET", "/api/health")

@@ -66,12 +66,29 @@ function uid(p = 'id') {
 }
 
 // 서버(server.py)처럼 이 컴퓨터 시각으로 기록한다 (UTC로 적으면 화면 시각이 9시간 어긋나고 '오늘'이 아침 9시에 바뀜)
-function nowStr() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+const pad2 = (n) => String(n).padStart(2, '0');
+function localStamp(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
-const todayStr = () => nowStr().slice(0, 10);
+function nowStr() {
+  return localStamp(new Date());
+}
+function parseStamp(stamp) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/.exec(String(stamp || ''));
+  return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+}
+
+// 하루 기준: 아침 8시부터 다음 날 아침 8시 전까지 (미션·소득세·행운의 게임 횟수, server.py와 같음)
+const DAY_START_HOUR = 8;
+function dayKeyOf(d) {
+  const t = new Date(d.getTime() - DAY_START_HOUR * 3600 * 1000);
+  return `${t.getFullYear()}-${pad2(t.getMonth() + 1)}-${pad2(t.getDate())}`;
+}
+function dayOf(stamp) {
+  const d = parseStamp(stamp);
+  return d ? dayKeyOf(d) : String(stamp || '').slice(0, 10);
+}
+const todayStr = () => dayKeyOf(new Date());
 
 // ---------- 미션 · 학급 회의 · 행운의 게임 규칙 (server.py와 같은 값) ----------
 const MISSIONS_SEED = [
@@ -89,6 +106,12 @@ const ITEM_PRICE_UPDATE = {
   '자리 바꾸기 쿠폰': [50, 150], '일일 선생님 쿠폰': [120, 120], '숙제 하루 면제 쿠폰': [80, 100], '급식 먼저 먹기 쿠폰': [40, 60],
   '음악 들으며 공부 쿠폰': [30, 40], '미니 노트': [25, 30], '캐릭터 연필': [20, 25], '간식 뽑기': [15, 20],
 };
+const PRICE_UPDATE_V4 = { '자리 바꾸기 교환권': 500, '학용품': 400, '간식 뽑기': 200, '숙제 하루 면제 쿠폰': 200 };
+const INCOME_TAX = 10;          // 접속한 날 아침 9시에 자동으로 (모자라면 마이너스 = 대출)
+const INCOME_TAX_HOUR = 9;
+const PROPERTY_TAX = 10;        // 선생님이 통보하면 학생이 골라서 낸다
+const PROPERTY_THRESHOLD = 100; // 잔액이 이보다 많으면 통보 대상
+const LUCK_FINE = 5;            // 하루 5번을 다 하면 도박 예방 교육비 (벌금)
 const LUCK_BET = 10;     // 기본 미션 1개 보상만큼
 const LUCK_FEE = 1;      // 수수료 10%
 const LUCK_DAILY = 5;    // 하루 횟수
@@ -111,7 +134,7 @@ function migrateDB(db) {
   if (!('luckEnabled' in db.settings)) { db.settings.luckEnabled = true; changed = true; }
   if (!('peGoalDays' in db.settings)) { db.settings.peGoalDays = 10; changed = true; }
   if (!Array.isArray(db.missions)) { db.missions = seedMissions(); changed = true; }
-  for (const k of ['submissions', 'peEvents', 'transactions', 'assignments']) if (!Array.isArray(db[k])) { db[k] = []; changed = true; }
+  for (const k of ['submissions', 'peEvents', 'transactions', 'assignments', 'propertyNotices']) if (!Array.isArray(db[k])) { db[k] = []; changed = true; }
   if (!('vote' in db)) { db.vote = null; changed = true; }
   if (Number(db.version || 1) < 2) {
     for (const it of db.items || []) {
@@ -135,9 +158,31 @@ function migrateDB(db) {
     db.version = 3;
     changed = true;
   }
+  if (Number(db.version || 1) < 4) {
+    for (const it of db.items || []) if (it.name in PRICE_UPDATE_V4) it.price = PRICE_UPDATE_V4[it.name];
+    for (const s of db.students || []) {
+      if (!('lastIncomeTaxDay' in s)) {
+        const days = db.transactions.filter(t => t.studentId === s.id && t.type === 'tax' && t.taxType === 'income').map(t => t.date || dayOf(t.createdAt));
+        s.lastIncomeTaxDay = days.sort().pop() || '';
+      }
+      if (!s.landBought || typeof s.landBought !== 'object') {
+        s.landBought = {};
+        for (const t of db.transactions) {
+          if (t.studentId !== s.id || t.type !== 'territory') continue;
+          const city = t.cityId || s.homeCity || 'seoul';
+          const rec = s.landBought[city] || (s.landBought[city] = { tiles: 0, paid: 0 });
+          rec.tiles += 1;
+          rec.paid += Number(t.amount || 0);
+        }
+      }
+    }
+    db.version = 4;
+    changed = true;
+  }
   for (const s of db.students || []) {
     if (!('characterLevel' in s)) { s.characterLevel = 1; changed = true; }
     if (!('territoryPurchases' in s)) { s.territoryPurchases = 0; changed = true; }
+    if (!s.landBought || typeof s.landBought !== 'object') { s.landBought = {}; changed = true; }
     if (!s.claimedCityTiles || typeof s.claimedCityTiles !== 'object' || Array.isArray(s.claimedCityTiles)) {
       const home = s.homeCity || 'seoul';
       const otherCities = [...new Set(s.claimedCities || [home])].filter(id => id !== home);
@@ -169,6 +214,7 @@ function makeRosterStudent(entry, idx) {
     roleId: entry.roleId, createdAt: nowStr(),
     animal: { name: p.name, species: p.species, emoji: p.emoji, title: p.title },
     homeCity: city.id, claimedCities: [city.id], claimedTiles: 6, claimedCityTiles: { [city.id]: 6 }, energy: 3, friends: [...p.friends],
+    landBought: {},
   };
 }
 
@@ -215,20 +261,20 @@ export function createDefaultDB() {
   const roles = CLASS_ROSTER.roles.map(r => ({ ...r, tasks: [...r.tasks], createdAt: nowStr() }));
 
   const items = [
-    { id: uid("i"), emoji: "🪑", name: "자리 바꾸기 교환권", type: "coupon", price: 150, description: SEAT_DESC, active: true, createdAt: nowStr() },
+    { id: uid("i"), emoji: "🪑", name: "자리 바꾸기 교환권", type: "coupon", price: 500, description: SEAT_DESC, active: true, createdAt: nowStr() },
     { id: uid("i"), emoji: "🧑‍🏫", name: "일일 선생님 쿠폰", type: "coupon", price: 120, description: "아침 활동 시간을 내가 진행해요.", active: true, createdAt: nowStr() },
-    { id: uid("i"), emoji: "📝", name: "숙제 하루 면제 쿠폰", type: "coupon", price: 100, description: "숙제 한 번을 면제받아요. (선생님 확인 필요)", active: true, createdAt: nowStr() },
+    { id: uid("i"), emoji: "📝", name: "숙제 하루 면제 쿠폰", type: "coupon", price: 200, description: "숙제 한 번을 면제받아요. (선생님 확인 필요)", active: true, createdAt: nowStr() },
     { id: uid("i"), emoji: "🍽️", name: "급식 먼저 먹기 쿠폰", type: "coupon", price: 60, description: "하루 동안 급식 줄 맨 앞에 서요.", active: true, createdAt: nowStr() },
     { id: uid("i"), emoji: "🎵", name: "음악 들으며 공부 쿠폰", type: "coupon", price: 40, description: "자습 시간에 이어폰으로 음악을 들어요.", active: true, createdAt: nowStr() },
     { id: uid("i"), emoji: "📒", name: "알림장 면제", type: "coupon", price: 100, description: "알림장 한 번을 면제받아요. (선생님 확인 필요)", active: true, createdAt: nowStr() },
-    { id: uid("i"), emoji: "✏️", name: "학용품", type: "goods", price: 200, description: "학급 상점에서 학용품을 골라요.", active: true, createdAt: nowStr() },
-    { id: uid("i"), emoji: "🍬", name: "간식 뽑기", type: "goods", price: 50, description: "간식 상자에서 한 개를 골라요.", active: true, createdAt: nowStr() }
+    { id: uid("i"), emoji: "✏️", name: "학용품", type: "goods", price: 400, description: "학급 상점에서 학용품을 골라요.", active: true, createdAt: nowStr() },
+    { id: uid("i"), emoji: "🍬", name: "간식 뽑기", type: "goods", price: 200, description: "간식 상자에서 한 개를 골라요.", active: true, createdAt: nowStr() }
   ];
 
   const students = CLASS_ROSTER.students.map(makeRosterStudent);
 
   return {
-    version: 3,
+    version: 4,
     settings: {
       className: "6학년 4반",
       classNameVersion: 1,
@@ -249,7 +295,8 @@ export function createDefaultDB() {
     submissions: [],
     assignments: [],
     vote: null,
-    peEvents: []
+    peEvents: [],
+    propertyNotices: []
   };
 }
 
@@ -315,7 +362,7 @@ export function studentView(s, includePin = false) {
 
 // ---------- 미션 · 학급 회의 · 행운의 게임 (server.py와 같은 규칙) ----------
 const sortedStudents = (db) => [...db.students].sort((a, b) => (a.number || 0) - (b.number || 0));
-const todaySubmissions = (db, sid) => db.submissions.filter(x => x.studentId === sid && (x.createdAt || '').startsWith(todayStr()));
+const todaySubmissions = (db, sid) => { const today = todayStr(); return db.submissions.filter(x => x.studentId === sid && dayOf(x.createdAt) === today); };
 
 function payStudent(db, s, amount, reason, stamp) {
   const before = levelInfo(s.exp).level;
@@ -377,15 +424,18 @@ function spendClassGoal(db, goal, reason, stamp) {
 const luckNet = (t) => (t.win ? t.amount : -t.amount);
 function classLuckTotals(db) {
   const all = db.transactions.filter(t => t.type === 'luck');
-  return { classPlays: all.length, classNet: all.reduce((a, t) => a + luckNet(t), 0), classFees: all.reduce((a, t) => a + (t.fee || 0), 0) };
+  const fines = db.transactions.filter(t => t.type === 'fine' && t.fineType === 'gambling');
+  return { classPlays: all.length, classNet: all.reduce((a, t) => a + luckNet(t), 0), classFees: all.reduce((a, t) => a + (t.fee || 0), 0), classFines: fines.reduce((a, t) => a + (t.amount || 0), 0) };
 }
+const luckFinedToday = (db, s, today) => db.transactions.some(t => t.type === 'fine' && t.fineType === 'gambling' && t.studentId === s.id && (t.date || dayOf(t.createdAt)) === today);
 function luckInfo(db, s) {
   const mine = db.transactions.filter(t => t.studentId === s.id && t.type === 'luck');
-  const playsToday = mine.filter(t => (t.createdAt || '').startsWith(todayStr())).length;
+  const today = todayStr();
+  const playsToday = mine.filter(t => dayOf(t.createdAt) === today).length;
   const wins = mine.filter(t => t.win).length;
   return {
-    enabled: db.settings.luckEnabled !== false, bet: LUCK_BET, fee: LUCK_FEE, daily: LUCK_DAILY,
-    playsToday, remaining: Math.max(0, LUCK_DAILY - playsToday),
+    enabled: db.settings.luckEnabled !== false, bet: LUCK_BET, fee: LUCK_FEE, daily: LUCK_DAILY, fine: LUCK_FINE,
+    playsToday, remaining: Math.max(0, LUCK_DAILY - playsToday), finedToday: luckFinedToday(db, s, today),
     plays: mine.length, wins, losses: mine.length - wins,
     fees: mine.reduce((a, t) => a + (t.fee || 0), 0), net: mine.reduce((a, t) => a + luckNet(t), 0),
     ...classLuckTotals(db),
@@ -435,13 +485,103 @@ function parseAssignment(body, db) {
   return { title, instructions, reward, studentIds, pdfName: pdfData ? pdfName : '', pdfData, active: true };
 }
 
+function incomeTaxDue(day) {
+  const [y, m, d] = day.split('-').map(Number);
+  return new Date(y, m - 1, d, INCOME_TAX_HOUR, 0, 0);
+}
+function chargeIncomeTax(db, s, day) {
+  const due = incomeTaxDue(day);
+  const seen = parseStamp(s.lastSeenAt) || due;
+  s.balance = Number(s.balance || 0) - INCOME_TAX;   // 자동 납부: 모자라면 마이너스(대출)
+  db.transactions.push({ id: uid('t'), studentId: s.id, studentName: s.name, type: 'tax', taxType: 'income', auto: true, date: day, amount: INCOME_TAX,
+    reason: '소득세 자동 납부 (접속한 날 아침 9시)', balanceAfter: s.balance, createdAt: localStamp(seen > due ? seen : due) });
+  s.lastIncomeTaxDay = day;
+}
+function settleIncomeTax(db, s, now) {
+  const day = s.lastSeenDay;
+  if (day && day > (s.lastIncomeTaxDay || '') && now >= incomeTaxDue(day)) { chargeIncomeTax(db, s, day); return true; }
+  return false;
+}
+/** 요청마다: 학생의 오늘 접속을 기록하고, 아침 9시가 지난 날의 소득세를 걷는다 (접속하지 않은 날은 걷지 않음) */
+function dailySettlement(db, studentId) {
+  const now = new Date();
+  const today = dayKeyOf(now);
+  let changed = false;
+  for (const s of db.students) changed = settleIncomeTax(db, s, now) || changed;
+  const s = studentId ? db.students.find(x => String(x.id) === String(studentId)) : null;
+  if (s && s.lastSeenDay !== today) {
+    s.lastSeenDay = today;
+    s.lastSeenAt = localStamp(now);
+    settleIncomeTax(db, s, now);
+    changed = true;
+  }
+  return changed;
+}
+const latestNotice = (db) => (db.propertyNotices || []).slice(-1)[0] || null;
+function propertyInfo(db, s) {
+  const n = latestNotice(db);
+  if (!n || !(n.targets || []).includes(s.id)) return null;
+  return { id: n.id, amount: n.amount, createdAt: n.createdAt, paid: !!(n.paid || {})[s.id] };
+}
 function taxInfo(db, s) {
   const date = todayStr();
-  const paid = type => db.transactions.some(t => t.studentId === s.id && t.type === 'tax' && t.taxType === type && (t.date || String(t.createdAt || '').slice(0, 10)) === date);
-  const incomePaid = paid('income');
-  const propertyPaid = paid('property');
-  return { date, incomePaid, propertyPaid, propertyDue: Number(s.balance || 0) > 100 && !propertyPaid };
+  const incomePaid = s.lastIncomeTaxDay === date;
+  const seen = s.lastSeenDay === date;
+  return { date, incomeTax: INCOME_TAX, incomeHour: INCOME_TAX_HOUR, dayStartHour: DAY_START_HOUR, incomePaid,
+    incomeStatus: incomePaid ? 'paid' : seen ? 'scheduled' : 'none', property: propertyInfo(db, s), propertyTax: PROPERTY_TAX, propertyThreshold: PROPERTY_THRESHOLD };
 }
+function propertySummary(db) {
+  const eligible = sortedStudents(db).filter(s => Number(s.balance || 0) > PROPERTY_THRESHOLD);
+  const n = latestNotice(db);
+  let latest = null;
+  if (n) {
+    const names = Object.fromEntries(db.students.map(s => [s.id, s.name]));
+    const paid = n.paid || {};
+    const targets = (n.targets || []).filter(id => id in names);
+    latest = { id: n.id, createdAt: n.createdAt, amount: n.amount, targets: targets.length, paid: targets.filter(id => paid[id]).length,
+      paidNames: targets.filter(id => paid[id]).map(id => names[id]), unpaidNames: targets.filter(id => !paid[id]).map(id => names[id]) };
+  }
+  return { amount: PROPERTY_TAX, threshold: PROPERTY_THRESHOLD, eligible: eligible.length, eligibleNames: eligible.map(s => s.name), latest };
+}
+/** 영토(확장·개척·침공)와 캐릭터 레벨업에 쓴 코인 → 총 경험치 (1코인 = 1 XP) */
+function growthTotals(db) {
+  const out = {};
+  for (const t of db.transactions) {
+    const kind = ['territory', 'invade'].includes(t.type) ? 'territory' : t.type === 'upgrade' ? 'levelup' : null;
+    if (!kind) continue;
+    const rec = out[t.studentId] || (out[t.studentId] = { territory: 0, levelup: 0 });
+    rec[kind] += Number(t.amount || 0);
+  }
+  for (const rec of Object.values(out)) rec.total = rec.territory + rec.levelup;
+  return out;
+}
+function dailyBoard(db) {
+  const today = todayStr();
+  const daily = db.missions.filter(m => m.daily && m.active !== false);
+  const growth = growthTotals(db);
+  const rows = sortedStudents(db).map(s => {
+    const subs = todaySubmissions(db, s.id).filter(x => !x.assignmentId);
+    const missions = {};
+    for (const m of daily) {
+      const mine = subs.filter(x => x.missionId === m.id);
+      missions[m.id] = mine.some(x => x.status === 'approved') ? 'done' : mine.some(x => x.status === 'pending') ? 'pending'
+        : m.kind === 'role' && !s.roleId ? 'off' : mine.some(x => x.status === 'rejected') ? 'retry' : 'none';
+    }
+    const seen = s.lastSeenDay === today;
+    const g = growth[s.id] || { territory: 0, levelup: 0, total: 0 };
+    return { id: s.id, number: s.number, name: s.name, balance: Number(s.balance || 0), missions, done: Object.values(missions).filter(v => v === 'done').length, seen,
+      incomeTax: s.lastIncomeTaxDay === today ? 'paid' : seen ? 'scheduled' : 'none', tiles: Number(s.claimedTiles ?? 6),
+      characterLevel: studentView(s).characterLevel, territoryCoins: g.territory, levelupCoins: g.levelup, totalXp: g.total };
+  });
+  return { date: today, dayStartHour: DAY_START_HOUR, incomeHour: INCOME_TAX_HOUR, missions: daily.map(m => ({ id: m.id, emoji: m.emoji || '🎯', name: m.name })), rows };
+}
+function addLand(s, cityId, tiles, paid) {
+  if (!s.landBought || typeof s.landBought !== 'object') s.landBought = {};
+  const rec = s.landBought[cityId] || (s.landBought[cityId] = { tiles: 0, paid: 0 });
+  rec.tiles = Number(rec.tiles || 0) + tiles;
+  rec.paid = Number(rec.paid || 0) + Number(paid);
+}
+const invadeCost = (rec) => 2 * Number(rec?.paid || 0) + 1;   // 원래 주인이 낸 코인의 2배보다 많이
 
 function spendCoins(db, s, amount, type, reason, extra = {}) {
   if (Number(s.balance || 0) < amount) throw new Error(`${db.settings.currencyName}이(가) ${amount - Number(s.balance || 0)}만큼 부족해요.`);
@@ -466,6 +606,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
   };
   if (path.startsWith('/teacher/') && token !== 't_token_teacher_master') throw new Error('선생님으로 로그인해 주세요.');
   if (path.startsWith('/student/') && !findStudent(getSessionStudentId())) throw new Error('학생으로 다시 로그인해 주세요.');
+  if (dailySettlement(db, path.startsWith('/student/') ? getSessionStudentId() : null)) saveLocalDB(db);
 
   // 1. 공통 정보
   if (path === '/public/info' && method === 'GET') {
@@ -559,13 +700,26 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
   if (path === '/student/taxes' && method === 'POST') {
     const s = findStudent(getSessionStudentId());
     const type = body?.type;
-    if (!['income', 'property'].includes(type)) throw new Error('소득세 또는 재산세를 골라 주세요.');
-    const info = taxInfo(db, s);
-    if (type === 'income' ? info.incomePaid : info.propertyPaid) throw new Error('오늘은 이미 납부한 세금이에요.');
-    if (type === 'property' && Number(s.balance || 0) <= 100) throw new Error('재산세는 잔액이 100코인을 넘을 때 납부해요.');
-    const transaction = spendCoins(db, s, 10, 'tax', `${type === 'income' ? '소득세' : '재산세'} 납부`, { taxType: type, date: info.date });
+    if (type === 'income') throw new Error('소득세는 접속한 날 아침 9시에 자동으로 내요.');
+    if (type !== 'property') throw new Error('재산세만 직접 낼 수 있어요.');
+    const n = latestNotice(db);
+    if (!n || !(n.targets || []).includes(s.id)) throw new Error('선생님이 보낸 재산세 통보가 없어요.');
+    n.paid = n.paid || {};
+    if (n.paid[s.id]) throw new Error('이번 통보의 재산세는 이미 냈어요.');
+    const transaction = spendCoins(db, s, n.amount, 'tax', '재산세 납부 (선생님 통보)', { taxType: 'property', noticeId: n.id, date: todayStr() });
+    n.paid[s.id] = transaction.createdAt;
     saveLocalDB(db);
     return { ok: true, student: studentView(s), taxInfo: taxInfo(db, s), transaction };
+  }
+
+  if (path === '/teacher/property-tax/notify' && method === 'POST') {
+    const targets = sortedStudents(db).filter(s => Number(s.balance || 0) > PROPERTY_THRESHOLD);
+    if (!targets.length) throw new Error(`재산세 납부 대상자가 없어요. (잔액이 ${PROPERTY_THRESHOLD} ${db.settings.currencyName}을 넘는 학생이 없어요)`);
+    db.propertyNotices = db.propertyNotices || [];
+    db.propertyNotices.push({ id: uid('p'), createdAt: nowStr(), day: todayStr(), amount: PROPERTY_TAX, threshold: PROPERTY_THRESHOLD, targets: targets.map(s => s.id), paid: {} });
+    db.propertyNotices = db.propertyNotices.slice(-30);
+    saveLocalDB(db);
+    return { ok: true, count: targets.length, propertyTax: propertySummary(db) };
   }
 
   if (path === '/student/upgrade-character' && method === 'POST') {
@@ -586,6 +740,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     s.claimedTiles = Number(s.claimedTiles ?? 6) + 1;
     const home = s.homeCity || 'seoul';
     s.claimedCityTiles[home] = Number(s.claimedCityTiles[home] || 0) + 1;
+    addLand(s, home, 1, transaction.amount);
     saveLocalDB(db);
     return { ok: true, student: studentView(s), transaction };
   }
@@ -643,8 +798,16 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
       id: uid('t'), studentId: s.id, studentName: s.name, type: 'luck', amount: Math.abs(net), win, bet: LUCK_BET, fee: LUCK_FEE, pick, marbles,
       reason: `🍀 행운의 게임 · ${pick === 'odd' ? '홀' : '짝'} → 구슬 ${marbles}개 (${win ? '맞힘' : '틀림'})`, balanceAfter: s.balance, createdAt: nowStr()
     });
+    let fine = null;
+    const today = todayStr();
+    if (luckInfo(db, s).playsToday >= LUCK_DAILY && !luckFinedToday(db, s, today)) {
+      s.balance -= LUCK_FINE;   // 벌금처럼 걷는다 (모자라면 마이너스)
+      fine = { id: uid('t'), studentId: s.id, studentName: s.name, type: 'fine', fineType: 'gambling', amount: LUCK_FINE, date: today,
+        reason: `🎓 도박 예방 교육비 (행운의 게임 하루 ${LUCK_DAILY}번)`, balanceAfter: s.balance, createdAt: nowStr() };
+      db.transactions.push(fine);
+    }
     saveLocalDB(db);
-    return { ok: true, result: { marbles, pick, win, bet: LUCK_BET, fee: LUCK_FEE, net }, student: studentView(s), luck: luckInfo(db, s) };
+    return { ok: true, result: { marbles, pick, win, bet: LUCK_BET, fee: LUCK_FEE, net }, fine, student: studentView(s), luck: luckInfo(db, s) };
   }
 
   if (path === '/student/shop' && method === 'GET') {
@@ -696,7 +859,9 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
         if (!city) continue;
         const isHome = cid === home;
         const cityTiles = Number(s.claimedCityTiles?.[cid] ?? (isHome ? tiles : 3));
-        city.residents.push({ id: s.id, number: s.number, name: s.name, level, characterLevel: studentView(s).characterLevel, animal, isHome, tiles: cityTiles });
+        const bought = s.landBought?.[cid] || {};
+        city.residents.push({ id: s.id, number: s.number, name: s.name, level, characterLevel: studentView(s).characterLevel, animal, isHome, tiles: cityTiles,
+          bought: Number(bought.tiles || 0), paid: Number(bought.paid || 0), invadeCost: bought.tiles ? invadeCost(bought) : null });
         city.totalTiles += cityTiles;
       }
     }
@@ -725,6 +890,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     s.claimedTiles = (s.claimedTiles ?? 6) + 1;
     s.territoryPurchases = studentView(s).territoryPurchases + 1;
     s.claimedCityTiles[cityId] = 1;
+    addLand(s, cityId, 1, COST);
     s.energy = Math.max(0, (s.energy ?? 2) - 1);
     if (!db.transactions) db.transactions = [];
     db.transactions.push({
@@ -733,6 +899,39 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
     });
     saveLocalDB(db);
     return { ok: true, message: `축하해요! ${city.name}에 내 깃발을 꽂았어요! 🚩`, city, student: studentView(s) };
+  }
+
+  if (path === '/student/invade' && method === 'POST') {
+    const s = findStudent(getSessionStudentId());
+    const cityId = String(body?.cityId || '');
+    const city = CITIES_DATA.find(c => c.id === cityId);
+    if (!city) throw new Error('존재하지 않는 도시예요.');
+    const target = findStudent(body?.targetId);
+    if (!target) throw new Error('침공할 친구를 찾을 수 없어요.');
+    if (target.id === s.id) throw new Error('내 영토는 침공할 수 없어요.');
+    const bought = target.landBought?.[cityId] || {};
+    const held = Number(target.claimedCityTiles?.[cityId] || 0);
+    const k = Math.min(Number(bought.tiles || 0), held);
+    if (k <= 0) throw new Error('이 도시에는 침공할 수 있는 영토가 없어요. (처음 받은 영토는 지킬 수 있어요)');
+    const cost = invadeCost(bought);
+    const transaction = spendCoins(db, s, cost, 'invade', `⚔️ ${target.name}의 ${city.name} 영토 ${k}칸 침공`, { cityId, targetId: target.id, tiles: k, ownerPaid: Number(bought.paid || 0) });
+    target.claimedCityTiles[cityId] = held - k;
+    target.claimedTiles = Math.max(0, Number(target.claimedTiles ?? 6) - k);
+    delete target.landBought[cityId];
+    if (target.claimedCityTiles[cityId] <= 0 && cityId !== target.homeCity) {
+      delete target.claimedCityTiles[cityId];
+      target.claimedCities = (target.claimedCities || []).filter(c => c !== cityId);
+    }
+    s.claimedCityTiles = s.claimedCityTiles || {};
+    s.claimedCityTiles[cityId] = Number(s.claimedCityTiles[cityId] || 0) + k;
+    s.claimedTiles = Number(s.claimedTiles ?? 6) + k;
+    if (!Array.isArray(s.claimedCities)) s.claimedCities = [s.homeCity || 'seoul'];
+    if (!s.claimedCities.includes(cityId)) s.claimedCities.push(cityId);
+    addLand(s, cityId, k, cost);
+    db.transactions.push({ id: uid('t'), studentId: target.id, studentName: target.name, type: 'invaded', amount: 0, tiles: k, cityId, attackerId: s.id,
+      reason: `🛡️ ${s.name}에게 ${city.name} 영토 ${k}칸을 빼앗겼어요`, balanceAfter: target.balance, createdAt: transaction.createdAt });
+    saveLocalDB(db);
+    return { ok: true, message: `⚔️ ${city.name}에서 ${target.name}의 영토 ${k}칸을 차지했어요!`, transaction, tiles: k, student: studentView(s) };
   }
 
   // 4. 교사 영역
@@ -756,7 +955,7 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
   if (path === '/teacher/state' && method === 'GET') {
     const today = todayStr();
     const txs = db.transactions || [];
-    const todays = txs.filter(t => (t.createdAt || '').startsWith(today));
+    const todays = txs.filter(t => dayOf(t.createdAt) === today);
     const given = todays.filter(t => t.type === 'give').reduce((a, t) => a + (t.amount || 0), 0);
     const taken = todays.filter(t => t.type === 'take').reduce((a, t) => a + (t.amount || 0), 0);
     const purchases = todays.filter(t => t.type === 'buy').length;
@@ -778,13 +977,15 @@ export async function handleMockAPI(path, { method = 'GET', body = null, token =
       assignments: db.assignments.map(assignmentView),
       pendingCount: db.submissions.filter(x => x.status === 'pending').length,
       classGoal: classGoal(db, { teacher: true }),
-      luck: { todayPlays: luckToday.length, todayFees: luckToday.reduce((a, t) => a + (t.fee || 0), 0), ...classLuckTotals(db) }
+      luck: { todayPlays: luckToday.length, todayFees: luckToday.reduce((a, t) => a + (t.fee || 0), 0), ...classLuckTotals(db) },
+      dailyBoard: dailyBoard(db),
+      propertyTax: propertySummary(db)
     };
   }
 
   if (path === '/teacher/missions' && method === 'GET') {
     const today = todayStr();
-    const approvedToday = db.submissions.filter(x => x.status === 'approved' && (x.reviewedAt || '').startsWith(today));
+    const approvedToday = db.submissions.filter(x => x.status === 'approved' && dayOf(x.reviewedAt || '') === today);
     const reviewed = db.submissions.filter(x => x.status !== 'pending')
       .sort((a, b) => String(b.reviewedAt || b.createdAt).localeCompare(String(a.reviewedAt || a.createdAt)));
     return {

@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert/strict');
-const runtimeModules = 'C:/Users/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules';
+// playwright·pdf-lib가 있는 node_modules 위치 (다른 컴퓨터에서는 UI_TEST_NODE_MODULES로 바꿀 수 있어요)
+const runtimeModules = process.env.UI_TEST_NODE_MODULES || 'C:/Users/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules';
 const { chromium } = require(path.join(runtimeModules, 'playwright'));
 const { PDFDocument, StandardFonts } = require(path.join(runtimeModules, 'pdf-lib'));
 
@@ -134,16 +135,20 @@ async function runMode(mode, pdfFile) {
     result.checks.push('21 roster names and 21 role assignments/tasks');
 
     await route(teacher, '#/teacher/shop', '#item-add');
-    for (const [name, price] of [['학용품', 200], ['간식 뽑기', 50], ['알림장 면제', 100]]) {
+    for (const [name, price] of [['자리 바꾸기 교환권', 500], ['학용품', 400], ['간식 뽑기', 200], ['숙제 하루 면제 쿠폰', 200], ['알림장 면제', 100]]) {
       const row = teacher.locator('tbody tr').filter({ has: teacher.getByText(name, { exact: true }) });
       assert.equal(await row.count(), 1);
       assert.equal((await row.locator('.bal-cell').innerText()).trim(), String(price));
     }
     assert.equal(state.items.filter(item => ['캐릭터 연필', '미니 노트', '미니노트'].includes(item.name)).length, 0);
-    result.checks.push('shop names and prices: 학용품 200 / 간식 뽑기 50 / 알림장 면제 100');
+    result.checks.push('shop prices: 자리 바꾸기 500 / 학용품 400 / 간식 뽑기 200 / 숙제 면제 200 / 알림장 면제 100');
 
     await route(teacher, '#/teacher/assignments', '#assignment-form');
     assert.match(await teacher.locator('#nav-assignments').innerText(), /교사 관리자/);
+    await teacher.locator('#student-board').waitFor();
+    assert.equal(await teacher.locator('#student-board tbody tr').count(), 21, 'student dashboard lists every student');
+    assert.ok((await teacher.locator('#student-board thead').innerText()).includes('총 경험치'));
+    result.checks.push('교사 관리자 shows the 21-student daily mission dashboard with total XP');
     const title = `UI PDF 과제 ${mode} ${Date.now()}`;
     await teacher.locator('#assignment-title').fill(title);
     await teacher.locator('#assignment-instructions').fill('첨부한 학습지의 1번 문제를 풀고 풀이를 적어 주세요.');
@@ -213,6 +218,14 @@ async function runMode(mode, pdfFile) {
     assert.equal(fundedState.students.find(s => s.id === pupil.id).balance, balanceBeforeReward + 10);
     await api(teacher, '/teacher/pay', { method: 'POST', body: { studentIds: [pupil.id], type: 'give', amount: 1000, reason: 'UI 검사 테스트 지원금' } });
     result.checks.push('teacher sees full answer and approves exactly one 10-coin reward');
+    // 재산세: 선생님이 납부 대상자(잔액 100 초과)에게 통보한다
+    await route(teacher, '#/teacher/assignments', '#property-notify');
+    await confirmedClick(teacher, '#property-notify');
+    await teacher.locator('.property-latest').waitFor();
+    const notified = await api(teacher, '/teacher/state');
+    assert.ok(notified.propertyTax.latest.targets >= 1);
+    assert.equal(notified.propertyTax.latest.paid, 0);
+    result.checks.push('teacher notifies property tax to students over 100 coins');
 
     activePage = student;
     await signIn(student, base, 'student', pupil.id);
@@ -227,19 +240,18 @@ async function runMode(mode, pdfFile) {
     assert.equal(me.transactions.filter(t => t.type === 'give' && t.reason.includes(title)).length, 1);
     result.checks.push('approved student answer remains readable and reward cannot repeat');
 
-    await route(student, '#/student', '[data-tax="income"]');
+    await route(student, '#/student', '.tax-card');
+    // 소득세: 버튼 없이 접속한 날 아침 9시에 자동으로 걷는다 (9시 전이면 '예정')
+    assert.equal(await student.locator('[data-tax="income"]').count(), 0, 'income tax has no manual button');
+    assert.ok(['paid', 'scheduled'].includes(me.taxInfo.incomeStatus), `income tax status ${me.taxInfo.incomeStatus}`);
+    assert.ok(me.transactions.filter(t => t.type === 'tax' && t.taxType === 'income' && t.date === me.taxInfo.date).length <= 1);
     const beforeTax = me.student.balance;
-    await confirmedClick(student, '[data-tax="income"]');
-    me = await poll(() => api(student, '/student/me'), data => data.taxInfo.incomePaid, 'income tax paid');
-    assert.equal(me.student.balance, beforeTax - 10);
-    await poll(() => student.locator('[data-tax="income"]').isDisabled(), value => value, 'income tax button disabled');
     await confirmedClick(student, '[data-tax="property"]');
-    me = await poll(() => api(student, '/student/me'), data => data.taxInfo.propertyPaid, 'property tax paid');
-    assert.equal(me.student.balance, beforeTax - 20);
-    await poll(() => student.locator('[data-tax="property"]').isDisabled(), value => value, 'property tax button disabled');
-    assert.equal(me.transactions.filter(t => t.type === 'tax' && /소득세/.test(t.reason)).length, 1);
-    assert.equal(me.transactions.filter(t => t.type === 'tax' && /재산세/.test(t.reason)).length, 1);
-    result.checks.push('daily 10-coin income/property taxes are paid once and disabled afterward');
+    me = await poll(() => api(student, '/student/me'), data => data.taxInfo.property?.paid, 'property tax paid');
+    assert.equal(me.student.balance, beforeTax - 10);
+    await poll(() => student.locator('[data-tax="property"]').count(), value => value === 0, 'property tax button gone after paying');
+    assert.equal(me.transactions.filter(t => t.type === 'tax' && t.taxType === 'property').length, 1);
+    result.checks.push('income tax is automatic; notified property tax is optional, 10 coins, paid once');
 
     const beforeUpgrade = me.student.balance;
     const experienceBefore = me.student.exp;
@@ -286,9 +298,9 @@ async function runMode(mode, pdfFile) {
     me = await api(student, '/student/me');
     assert.deepEqual({ balance: me.student.balance, characterLevel: me.student.characterLevel, tiles: me.student.claimedTiles, purchases: me.student.territoryPurchases }, persisted);
     assert.equal(me.myAssignmentSubmissions.find(x => x.id === submission.id).status, 'approved');
-    assert.ok(me.taxInfo.incomePaid && me.taxInfo.propertyPaid);
+    assert.ok(me.taxInfo.property?.paid);
     result.checks.push('reload preserves balance, levels, territory, tax and approved assignment');
-    await route(student, '#/student', '[data-tax="income"]');
+    await route(student, '#/student', '.tax-card');
     await noOverflow(student, 'student-desktop', result, mode);
     await student.setViewportSize({ width: 390, height: 844 });
     await noOverflow(student, 'student-mobile', result, mode);

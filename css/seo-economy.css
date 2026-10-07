@@ -46,3 +46,100 @@ textarea.assignment-answer { min-height: 150px; width: 100%; max-height: none; }
   .economy-actions .btn { white-space: normal; }
   #teacher-assignments { scroll-margin-top: 145px; }
 }
+
+/* 서초롱: 대출 경고 · 자동 소득세 · 재산세 통보 */
+.debt-banner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 14px 18px; margin-bottom: 18px; border-radius: var(--radius-lg); background: linear-gradient(120deg, rgba(225, 29, 72, .32), rgba(251, 113, 133, .16)); border: 1px solid rgba(251, 113, 133, .7); box-shadow: 0 10px 30px rgba(225, 29, 72, .25); animation: debtPulse 2.2s ease-in-out infinite; }
+.debt-banner > div { flex: 1; min-width: 200px; }
+.debt-banner > div > b { font-family: var(--font-display); font-size: 22px; font-weight: 400; color: #fff; }
+.debt-banner p { margin-top: 2px; font-size: 14px; line-height: 1.6; color: #fecdd3; }
+.debt-icon { font-size: 32px; }
+@keyframes debtPulse { 0%, 100% { box-shadow: 0 10px 30px rgba(225, 29, 72, .2); } 50% { box-shadow: 0 10px 40px rgba(225, 29, 72, .5); } }
+.debt-pill { display: inline-flex; align-items: center; margin-left: 8px; padding: 3px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 800; color: #fff; background: #e11d48; vertical-align: middle; }
+.debt-pill.sm { padding: 1px 7px; font-size: 11px; margin-left: 6px; }
+.balance-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.invaded-banner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 16px; margin-bottom: 18px; border-radius: var(--radius); background: rgba(251, 113, 133, .1); border: 1px solid rgba(251, 113, 133, .45); font-weight: 700; color: #fecdd3; }
+.invaded-banner > span:first-child { font-size: 24px; }
+.invaded-go { margin-left: auto; color: #fff; }
+.tax-card { gap: 10px; }
+.tax-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 14px; border-radius: 12px; background: rgba(255, 255, 255, .05); border: 1px solid var(--border); }
+.tax-name { flex: 1; min-width: 170px; }
+.tax-name b { font-size: 16px; }
+.tax-name small { display: block; margin-top: 2px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.tax-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.tax-state { font-size: 13.5px; font-weight: 700; color: var(--faint); }
+.tax-state.ok { color: #a7f3d0; }
+.tax-state.wait { color: #fde68a; }
+.tax-state.notice { color: #bae6fd; }
+.tx-icon.fine, .badge.fine { background: rgba(251, 191, 36, .16); }
+.badge.fine { color: #fde68a; }
+.tx-icon.invade, .badge.invade { background: rgba(251, 113, 133, .16); }
+.badge.invade { color: #fecdd3; }
+.tx-icon.invaded, .badge.invaded { background: rgba(148, 163, 184, .18); }
+.badge.invaded { color: #e2e8f0; }
+.badge.tax { background: rgba(56, 189, 248, .14); color: #bae6fd; }
+.badge.upgrade { background: rgba(244, 114, 182, .14); color: #fbcfe8; }
+.badge.territory { background: rgba(45, 212, 191, .14); color: #99f6e4; }
+
+/* 행운의 게임: 도박 예방 교육비 */
+.luck-result.warn { color: #fde68a; }
+.luck-fine-rule { margin-top: 12px; padding: 10px 12px; border-radius: 12px; font-size: 13.5px; line-height: 1.6; color: #fde68a; background: rgba(251, 191, 36, .1); border: 1px solid rgba(251, 191, 36, .35); }
+.luck-fine { color: #fde68a; font-size: 14px; }
+
+/* 교사 관리자: 학생 대시보드 · 재산세 통보 */
+.board-card, .property-card { margin-bottom: 18px; }
+.board-date { font-size: 13.5px; }
+.board-summary { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; margin: 6px 0 12px; }
+.stat-pill.warn { border-color: rgba(251, 113, 133, .55); background: rgba(225, 29, 72, .14); }
+.stat-pill.warn b { color: #fecdd3; }
+.board-sort { display: flex; align-items: center; gap: 8px; margin-left: auto; font-size: 13px; font-weight: 700; color: var(--muted); }
+.board-sort .select { width: auto; min-width: 150px; height: 40px; }
+.board-debt { margin-bottom: 12px; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.7; color: #fecdd3; background: rgba(225, 29, 72, .12); border: 1px solid rgba(251, 113, 133, .45); }
+.board-wrap { max-height: 70vh; overflow: auto; }
+.board-table th, .board-table td { padding-top: 9px; padding-bottom: 9px; white-space: nowrap; }
+.board-table thead th { position: sticky; top: 0; z-index: 1; background: #1b1450; }
+th.board-ms { text-align: center; min-width: 64px; }
+th.board-ms span { display: block; font-size: 18px; }
+th.board-ms small { display: block; max-width: 84px; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--muted); }
+td.board-ms { text-align: center; font-size: 17px; }
+td.ms-none { opacity: .55; }
+tr.in-debt td { background: rgba(225, 29, 72, .07); }
+.xp-cell b { font-family: var(--font-display); font-weight: 400; font-size: 19px; }
+.xp-cell small { display: block; font-size: 11.5px; color: var(--faint); }
+.property-latest { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; padding: 12px 14px; border-radius: 12px; font-size: 14px; background: rgba(255, 255, 255, .05); border: 1px solid var(--border); }
+.property-latest small { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+
+/* 세계지도: 도시 국가 영역 · 침공 */
+.wm-zone { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid #c084fc; background: radial-gradient(circle, rgba(192, 132, 252, .95) 0 40%, rgba(192, 132, 252, .25) 42% 100%); }
+.zone-box { margin-top: 12px; padding: 12px 14px; border-radius: 12px; background: rgba(255, 255, 255, .05); border: 1px solid var(--border); }
+.zone-box.empty { font-size: 13.5px; font-weight: 700; color: var(--muted); }
+.zone-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; }
+.zone-head b { font-size: 15px; }
+.zone-head small { font-size: 12px; color: var(--faint); }
+.zone-bar { display: flex; height: 12px; margin-top: 8px; border-radius: 999px; overflow: hidden; background: rgba(255, 255, 255, .08); }
+.zone-bar i { display: block; height: 100%; min-width: 4px; }
+.zone-bar i + i { box-shadow: inset 2px 0 0 rgba(13, 10, 42, .7); }
+.zone-owners { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; list-style: none; font-size: 13px; color: var(--muted); }
+.zone-owners li { display: inline-flex; align-items: center; gap: 5px; }
+.zone-owners li i { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.zone-owners b { color: var(--text); }
+.zone-owners small { color: var(--faint); }
+.invade-box { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 12px; padding: 14px; border-radius: var(--radius); background: rgba(251, 113, 133, .1); border: 1px solid rgba(251, 113, 133, .42); }
+.invade-box p { margin-top: 2px; color: var(--muted); font-size: 13.5px; line-height: 1.6; }
+.resident { border-left: 4px solid var(--owner, var(--border)); }
+.owner-dot { display: inline-block; width: 9px; height: 9px; margin-right: 5px; border-radius: 50%; background: var(--owner, var(--friend)); vertical-align: 0; }
+.resident-land { display: block; margin-top: 3px; font-size: 12px; line-height: 1.5; color: var(--faint); }
+.resident-land b { color: #fecdd3; }
+.city-body > section > * + * { margin-top: 12px; }
+.city-body > section > :first-child { margin-top: 0; }
+.resident { flex-wrap: wrap; }
+.resident-info { min-width: 170px; }
+.resident > .btn { flex-shrink: 0; margin-left: auto; }
+.wm-legend em { font-style: normal; }
+@media (max-width: 680px) {
+  .wm-zone-more { display: none; }
+}
+@media (max-width: 700px) {
+  .invade-box { flex-direction: column; align-items: stretch; }
+  .board-sort { margin-left: 0; width: 100%; }
+  .tax-status { justify-content: flex-start; }
+}

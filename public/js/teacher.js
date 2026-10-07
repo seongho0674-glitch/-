@@ -2,10 +2,10 @@
 // 교사 화면: 학생(메인·자율 체육 회의) / 미션 / 세계지도 현황 / 거래 내역 / 상점 관리 / 역할 관리 / 설정
 // ==========================================================
 import {
-  $, $$, esc, fmt, fmtDate, todayKey, todayLabel, api, logout, toast, avatar,
+  $, $$, esc, fmt, fmtDate, todayKey, dayKey, dayOf, todayLabel, api, logout, toast, avatar,
   openModal, confirmModal, coinBurst, loadingHTML, readPdfFile, openAssignmentPdf,
 } from './core.js';
-import { createWorldMap, openCityModal, cityKind, inContinent, coordText, CONTINENT_NAMES } from './world3d.js';
+import { createWorldMap, openCityModal, cityKind, inContinent, coordText, CONTINENT_NAMES, zoneBarHTML, zoneTiles } from './world3d.js';
 
 const selected = new Set();   // 메인 화면에서 체크한 학생들 (화면을 옮겨도 유지)
 let flashIds = [];            // 방금 지급·차감한 학생 줄 반짝이기
@@ -20,8 +20,13 @@ const TAKE_REASONS = ['숙제 미제출', '수업 방해', '지각', '정리 정
 const ITEM_EMOJI = ['🎁', '🎟️', '🪑', '🎵', '📝', '🍽️', '🧑‍🏫', '✏️', '🍬', '📒', '🎮', '⚽', '🖍️', '🧸', '🍫', '⏰', '📚', '🎨'];
 const ROLE_EMOJI = ['⭐', '🧽', '💡', '🪟', '📚', '🗑️', '🪴', '📮', '🍚', '📅', '🧹', '💻', '🏦', '🔔', '🎵', '🧴', '📏', '🐟'];
 const MISSION_EMOJI = ['🎯', '🧩', '🗂️', '💡', '📖', '📒', '🎒', '🔎', '🧮', '✍️', '🧪', '🎨', '🏃', '🎤', '🌱', '🤝', '📝', '🌍'];
-const TX_TYPE = { give: '지급', take: '차감', buy: '구매', luck: '행운의 게임', class: '자율 체육', tax: '세금', upgrade: '캐릭터 성장', territory: '영토 확장' };
-const txTypeLabel = (t) => t.type === 'tax' && /재산세|소득세/.test(t.reason || '') ? (t.reason.includes('재산세') ? '재산세' : '소득세') : (TX_TYPE[t.type] || t.type);
+const TX_TYPE = { give: '지급', take: '차감', buy: '구매', luck: '행운의 게임', fine: '도박 예방 교육', class: '자율 체육', tax: '세금', upgrade: '캐릭터 성장', territory: '영토 확장', invade: '침공', invaded: '영토 빼앗김' };
+const txTypeLabel = (t) => {
+  if (t.type !== 'tax') return TX_TYPE[t.type] || t.type;
+  if (t.taxType === 'income' || (!t.taxType && /소득세/.test(t.reason || ''))) return t.auto ? '소득세(자동)' : '소득세';
+  if (t.taxType === 'property' || /재산세/.test(t.reason || '')) return '재산세';
+  return '세금';
+};
 const isPlus = (t) => t.type === 'give' || (t.type === 'luck' && t.win);
 
 export async function renderTeacher(app, view) {
@@ -89,6 +94,7 @@ export async function renderTeacher(app, view) {
   }
 
   const roleOf = (s) => st.roles.find((r) => r.id === s.roleId);
+  const boardOf = (id) => (st.dailyBoard?.rows || []).find((r) => r.id === id);
 
   // ======================= 학생(메인) =======================
   let search = '';
@@ -148,8 +154,8 @@ export async function renderTeacher(app, view) {
                 <td><input type="checkbox" class="chk row-chk" ${selected.has(s.id) ? 'checked' : ''} aria-label="${esc(s.name)} 선택"></td>
                 <td class="num-cell">${s.number}</td>
                 <td><div class="name-cell">${avatar(s.name, s.number)}${esc(s.name)}</div></td>
-                <td class="bal-cell ${s.balance < 0 ? 'minus' : ''}">${fmt(s.balance)} <span class="faint" style="font-size:14px">${cur()}</span></td>
-                <td><div class="lv-cell"><span class="lv-pill" title="코인으로 키운 캐릭터">캐릭터 Lv.${Number(s.characterLevel) || 1}</span></div><div class="lv-cell"><small class="faint">경험치 Lv.${s.level}</small><span class="mini-bar" title="${s.expInLevel}/${s.expToNext} XP"><i style="width:${pct}%"></i></span></div></td>
+                <td class="bal-cell ${s.balance < 0 ? 'minus' : ''}">${fmt(s.balance)} <span class="faint" style="font-size:14px">${cur()}</span>${s.balance < 0 ? '<span class="debt-pill sm">대출</span>' : ''}</td>
+                <td><div class="lv-cell"><span class="lv-pill" title="코인으로 키운 캐릭터">캐릭터 Lv.${Number(s.characterLevel) || 1}</span></div><div class="lv-cell"><small class="faint">경험치 Lv.${s.level}</small><span class="mini-bar" title="${s.expInLevel}/${s.expToNext} XP"><i style="width:${pct}%"></i></span></div>${boardOf(s.id)?.totalXp ? `<div class="lv-cell"><small class="faint" title="영토 ${fmt(boardOf(s.id).territoryCoins)} + 레벨업 ${fmt(boardOf(s.id).levelupCoins)}">🏆 총 경험치 <b class="gold">${fmt(boardOf(s.id).totalXp)}</b></small></div>` : ''}</td>
                 <td>${r ? `<span class="role-chip">${esc(r.emoji)} ${esc(r.name)}</span>` : '<span class="role-chip none">없음</span>'}</td>
                 <td><div class="act-cell">
                   <button class="btn btn-give btn-sm act-give" id="give-${esc(s.id)}">＋ 지급</button>
@@ -246,7 +252,7 @@ export async function renderTeacher(app, view) {
           <div class="goal-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></div>
           <p class="goal-note">${g.studentCount}명 × 하루 ${fmt(g.perDay)} ${cur()}(매일 미션 보상) × ${g.days}일 = ${fmt(g.goal)} ${cur()} · 목표 일수는 <a href="#/teacher/settings">설정</a>에서 바꿀 수 있어요</p>
           ${last ? `<p class="goal-last">지난 자율 체육: ${fmtDate(last.date, false)} · 찬성 ${last.rate}% · ${fmt(last.spent)} ${cur()} 사용</p>` : ''}
-          ${v && v.status !== 'open' && v.closedAt?.slice(0, 10) === todayKey() ? `<p class="goal-msg ${v.status === 'passed' ? 'ok' : ''}">${v.status === 'passed' ? '🎉 오늘 회의 통과!' : v.status === 'failed' ? '오늘 회의는 부결됐어요.' : '오늘 회의를 취소했어요.'}${v.result ? ` (찬성 ${v.result.yes}명 · ${v.result.rate}%)` : ''}</p>` : ''}
+          ${v && v.status !== 'open' && v.closedAt && dayOf(v.closedAt) === dayKey() ? `<p class="goal-msg ${v.status === 'passed' ? 'ok' : ''}">${v.status === 'passed' ? '🎉 오늘 회의 통과!' : v.status === 'failed' ? '오늘 회의는 부결됐어요.' : '오늘 회의를 취소했어요.'}${v.result ? ` (찬성 ${v.result.yes}명 · ${v.result.rate}%)` : ''}</p>` : ''}
         </div>
         <div class="goal-actions">${action}</div>
       </div>`;
@@ -424,7 +430,9 @@ export async function renderTeacher(app, view) {
           ${sum('class') ? ` · <span class="sky">자율 체육 ${fmt(sum('class'))}</span>` : ''}
           ${sum('tax') ? ` · <span class="minus">세금 ${fmt(sum('tax'))}</span>` : ''}
           ${sum('upgrade') ? ` · <span class="gold">캐릭터 성장 ${fmt(sum('upgrade'))}</span>` : ''}
-          ${sum('territory') ? ` · <span class="sky">영토 확장 ${fmt(sum('territory'))}</span>` : ''}</span>
+          ${sum('territory') ? ` · <span class="sky">영토 확장 ${fmt(sum('territory'))}</span>` : ''}
+          ${sum('invade') ? ` · <span class="sky">침공 ${fmt(sum('invade'))}</span>` : ''}
+          ${sum('fine') ? ` · <span class="minus">도박 예방 교육 ${fmt(sum('fine'))}</span>` : ''}</span>
       </div>
       <div class="table-wrap">
         <table class="table">
@@ -436,7 +444,7 @@ export async function renderTeacher(app, view) {
                 <td style="font-weight:700;white-space:nowrap">${esc(t.studentName)}</td>
                 <td><span class="badge ${t.type}">${esc(txTypeLabel(t))}</span></td>
                 <td>${esc(t.reason)}</td>
-                <td style="text-align:right" class="bal-cell ${isPlus(t) ? 'plus' : 'minus'}">${isPlus(t) ? '+' : '−'}${fmt(t.amount)}</td>
+                <td style="text-align:right" class="bal-cell ${isPlus(t) ? 'plus' : 'minus'}">${t.type === 'invaded' ? `영토 −${fmt(t.tiles)}칸` : `${isPlus(t) ? '+' : '−'}${fmt(t.amount)}`}</td>
                 <td style="text-align:right" class="muted">${fmt(t.balanceAfter)}</td>
               </tr>`).join('')}
           </tbody>
@@ -818,7 +826,7 @@ export async function renderTeacher(app, view) {
         <div class="world-head">
           <div>
             <h1 class="page-title">🌍 우리 반 세계지도</h1>
-            <p class="page-sub">전자칠판에 띄워 학생들의 수호동물이 사는 도시를 함께 보고, 도시를 눌러 바로 보상을 줄 수 있어요.</p>
+            <p class="page-sub">21개 도시 국가마다 학생 영토가 칸 수만큼 색칠돼요(점선은 도시 국가의 경계). 전자칠판에 띄워 영토가 넓어지는 모습을 함께 보고, 도시를 눌러 바로 보상을 줄 수 있어요.</p>
           </div>
           <div class="world-head-stats" id="tw-stats">${worldStatsHTML()}</div>
         </div>
@@ -879,12 +887,13 @@ export async function renderTeacher(app, view) {
         <p class="ws-tagline">“${esc(c.tagline)}”</p>
         <div class="ws-landmark"><span aria-hidden="true">🏛️</span><div><b>${esc(c.landmark)}</b><p>${esc(c.landmarkDesc)}</p></div></div>
         <div class="ws-coord">📍 ${coordText(c)}</div>
+        ${zoneBarHTML(c)}
         ${res.length ? `
           <ul class="ws-people">
             ${res.map((r) => `
               <li class="ws-person">
                 <span class="ws-person-emoji" aria-hidden="true">${r.animal?.emoji || '🐾'}</span>
-                <span class="ws-person-main"><b>${esc(r.name)}</b><small>Lv.${Number(r.level) || 1} · ${esc(r.animal?.name || '')} · ${r.isHome ? '시작 도시' : '개척한 도시'}</small></span>
+                <span class="ws-person-main"><b>${esc(r.name)}</b><small>Lv.${Number(r.level) || 1} · ${esc(r.animal?.name || '')} · ${r.isHome ? '시작 도시' : '개척한 도시'} · ${fmt(r.tiles)}칸${Number(r.bought) > 0 ? ` (넓힌 땅 ${fmt(r.bought)}칸 · 침공 ${fmt(r.invadeCost)} ${cur()})` : ''}</small></span>
                 <button type="button" class="btn btn-give btn-sm" data-give="${esc(r.id)}">🎁 보상</button>
               </li>`).join('')}
           </ul>` : '<p class="muted" style="margin-top:12px;font-size:13.5px">아직 이 도시에 사는 학생이 없어요.</p>'}
@@ -902,7 +911,7 @@ export async function renderTeacher(app, view) {
           <div class="t-city-head">
             <span class="t-city-icon" aria-hidden="true">${c.emoji || '🏛️'}</span>
             <div>
-              <h4 class="t-city-name">${esc(c.name)} <small class="muted">${esc(c.country)}</small></h4>
+              <h4 class="t-city-name">${esc(c.name)} <small class="muted">${esc(c.country)} · 영토 ${fmt(zoneTiles(c))}칸</small></h4>
               <div class="t-city-landmark gold">${esc(c.landmark)}</div>
             </div>
             <span class="status-pill k-${cityKind(c, null)}">${res.length ? `${res.length}명` : '미개척'}</span>
@@ -913,7 +922,7 @@ export async function renderTeacher(app, view) {
               ${res.map((r) => `
                 <li class="t-res-row">
                   <span class="t-res-animal" aria-hidden="true">${r.animal?.emoji || '🐾'}</span>
-                  <span class="t-res-info"><b>${esc(r.name)}</b> <small class="gold">Lv.${Number(r.level) || 1} ${esc(r.animal?.name || '')}</small></span>
+                  <span class="t-res-info"><b>${esc(r.name)}</b> <small class="gold">Lv.${Number(r.level) || 1} ${esc(r.animal?.name || '')} · ${fmt(r.tiles)}칸</small></span>
                   <button type="button" class="btn btn-give btn-sm" data-give="${esc(r.id)}">🎁 보상</button>
                 </li>`).join('')}
             </ul>` : '<p class="muted" style="font-size:13px;margin-top:10px">아직 사는 학생이 없어요.</p>'}
@@ -987,6 +996,118 @@ export async function renderTeacher(app, view) {
     });
   }
 
+  // ======================= 교사 관리자 · 학생 대시보드 =======================
+  const MS_ICON = { done: '✅', pending: '⏳', retry: '↩️', none: '○', off: '🔒' };
+  const MS_LABEL = { done: '받음', pending: '확인 기다림', retry: '반려됨', none: '아직', off: '역할 없음' };
+  let boardSort = 'number';
+
+  function boardRows() {
+    const rows = [...(st.dailyBoard?.rows || [])];
+    if (boardSort === 'xp') rows.sort((a, b) => b.totalXp - a.totalXp || a.number - b.number);
+    else if (boardSort === 'balance') rows.sort((a, b) => a.balance - b.balance || a.number - b.number);
+    else if (boardSort === 'missions') rows.sort((a, b) => a.done - b.done || a.number - b.number);
+    return rows;
+  }
+
+  function boardHTML() {
+    const b = st.dailyBoard;
+    if (!b) return '';
+    const rows = b.rows || [];
+    const ms = b.missions || [];
+    const seen = rows.filter((r) => r.seen).length;
+    const allDone = ms.length ? rows.filter((r) => r.done === ms.length).length : 0;
+    const taxed = rows.filter((r) => r.incomeTax === 'paid').length;
+    const debt = rows.filter((r) => r.balance < 0);
+    const taxCell = (r) => (r.incomeTax === 'paid' ? '<span class="plus" title="오늘 소득세를 냈어요">✅ 냄</span>'
+      : r.incomeTax === 'scheduled' ? `<span class="gold" title="접속했어요. 아침 ${b.incomeHour}시에 자동으로 걷어요">⏰ ${b.incomeHour}시</span>`
+        : '<span class="faint" title="오늘 접속하지 않아 걷지 않아요">— 미접속</span>');
+    return `
+      <section class="card board-card" id="student-board" aria-label="학생 대시보드">
+        <div class="card-head">
+          <h2 class="card-title">📊 학생 대시보드 · 오늘의 일일 미션</h2>
+          <span class="muted board-date">${fmtDate(`${b.date}T12:00:00`, false)} · 아침 ${b.dayStartHour}시에 새로 시작</span>
+        </div>
+        <div class="board-summary">
+          <div class="stat-pill"><small>오늘 접속</small><b>${seen} / ${rows.length}명</b></div>
+          <div class="stat-pill"><small>일일 미션 모두 완료</small><b>${allDone}명</b></div>
+          <div class="stat-pill"><small>소득세 자동 납부</small><b>${taxed}명</b></div>
+          <div class="stat-pill ${debt.length ? 'warn' : ''}"><small>🚨 대출(마이너스)</small><b>${debt.length}명</b></div>
+          <label class="board-sort"><span>정렬</span>
+            <select class="select" id="board-sort" aria-label="학생 대시보드 정렬">
+              ${[['number', '번호 순'], ['missions', '미션 적은 순'], ['balance', '잔액 적은 순'], ['xp', '총 경험치 높은 순']].map(([k, v]) => `<option value="${k}" ${boardSort === k ? 'selected' : ''}>${v}</option>`).join('')}
+            </select>
+          </label>
+        </div>
+        ${debt.length ? `<p class="board-debt">🚨 대출을 갚아야 하는 학생: ${debt.map((r) => `<b>${esc(r.name)}</b> (${fmt(r.balance)})`).join(', ')}</p>` : ''}
+        <div class="table-wrap board-wrap">
+          <table class="table board-table">
+            <thead><tr>
+              <th>번호</th><th>이름</th><th>접속</th>
+              ${ms.map((m) => `<th class="board-ms" title="${esc(m.name)}"><span aria-hidden="true">${esc(m.emoji)}</span><small>${esc(m.name)}</small></th>`).join('')}
+              <th>미션</th><th>소득세</th><th style="text-align:right">잔액</th><th style="text-align:right">영토</th><th style="text-align:right" title="영토(확장·개척·침공)에 쓴 코인 + 캐릭터 레벨업에 쓴 코인">🏆 총 경험치</th>
+            </tr></thead>
+            <tbody>
+              ${boardRows().map((r) => `
+                <tr class="${r.balance < 0 ? 'in-debt' : ''}">
+                  <td class="num-cell">${r.number}</td>
+                  <td><div class="name-cell">${avatar(r.name, r.number)}${esc(r.name)}</div></td>
+                  <td>${r.seen ? '<span class="plus" title="오늘 접속했어요">🟢</span>' : '<span class="faint" title="오늘 아직 접속하지 않았어요">⚪</span>'}</td>
+                  ${ms.map((m) => { const v = r.missions?.[m.id] || 'none'; return `<td class="board-ms ms-${v}" title="${esc(m.name)}: ${MS_LABEL[v]}">${MS_ICON[v]}</td>`; }).join('')}
+                  <td><b>${r.done}</b><small class="faint"> / ${ms.length}</small></td>
+                  <td>${taxCell(r)}</td>
+                  <td style="text-align:right" class="bal-cell ${r.balance < 0 ? 'minus' : ''}">${fmt(r.balance)}${r.balance < 0 ? '<span class="debt-pill sm">대출</span>' : ''}</td>
+                  <td style="text-align:right">${fmt(r.tiles)}칸</td>
+                  <td style="text-align:right" class="xp-cell"><b class="gold">${fmt(r.totalXp)}</b><small>영토 ${fmt(r.territoryCoins)} + 레벨업 ${fmt(r.levelupCoins)}</small></td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+          ${rows.length ? '' : '<div class="empty"><span class="emo">🙋</span>학생이 없어요.</div>'}
+        </div>
+        <p class="hint">${ms.length ? `✅ 받음 · ⏳ 확인 기다림 · ↩️ 반려됨 · ○ 아직 · 🔒 역할 없음 — 📅 '매일 하는 미션'만 보여요.` : '📅 매일 하는 미션이 없어요. 미션 화면에서 미션을 고칠 때 "매일 하는 미션"을 켜 주세요.'}
+          🏆 총 경험치 = 영토(확장·개척·침공)에 쓴 ${cur()} + 캐릭터 레벨업에 쓴 ${cur()} (1 ${cur()} = 1 경험치)</p>
+      </section>`;
+  }
+
+  function propertyCardHTML() {
+    const p = st.propertyTax;
+    if (!p) return '';
+    const L = p.latest;
+    return `
+      <section class="card property-card" aria-label="재산세 통보">
+        <div class="card-head"><h2 class="card-title">🏠 재산세 통보</h2><span class="tag">잔액 ${fmt(p.threshold)} ${cur()} 초과</span></div>
+        <p>지금 재산세 납부 대상자는 <b class="gold">${p.eligible}명</b>이에요.${p.eligible ? ` <span class="muted">(${p.eligibleNames.map(esc).join(', ')})</span>` : ''}</p>
+        <div class="economy-actions">
+          <button type="button" class="btn btn-gold" id="property-notify" ${p.eligible ? '' : 'disabled'}>📮 납부 대상자에게 통보하기</button>
+        </div>
+        <p class="hint">통보를 받은 학생은 재산세 ${fmt(p.amount)} ${cur()}을 <b>골라서</b> 낼 수 있어요. 내지 않아도 괜찮아요. 새로 통보하면 이전 통보는 끝나요.</p>
+        ${L ? `
+          <div class="property-latest">
+            <div><b>최근 통보</b> ${fmtDate(L.createdAt)} · ${L.targets}명 중 <b class="plus">${L.paid}명</b> 납부</div>
+            ${L.paidNames.length ? `<small>✅ 냄: ${L.paidNames.map(esc).join(', ')}</small>` : ''}
+            ${L.unpaidNames.length ? `<small class="faint">○ 아직: ${L.unpaidNames.map(esc).join(', ')}</small>` : ''}
+          </div>` : ''}
+      </section>`;
+  }
+
+  function bindBoard() {
+    const sort = $('#board-sort');
+    if (sort) sort.onchange = (e) => { boardSort = e.target.value; paint(); };
+    $('#property-notify')?.addEventListener('click', async () => {
+      const p = st.propertyTax;
+      const ok = await confirmModal({
+        emoji: '📮', title: '재산세 통보',
+        html: `잔액이 ${fmt(p.threshold)} ${cur()}보다 많은 <b>${p.eligible}명</b>에게 재산세 ${fmt(p.amount)} ${cur()}을 통보할까요?<br><span class="muted">학생은 통보를 보고 낼지 말지 골라요.</span>`,
+        okText: '통보하기', okClass: 'btn-gold',
+      });
+      if (!ok) return;
+      try {
+        const r = await api('/teacher/property-tax/notify', { method: 'POST', body: {} });
+        toast(`📮 ${r.count}명에게 재산세를 통보했어요.`);
+        await refresh();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  }
+
   // ======================= 교사 관리자 · 선생님 과제 =======================
   function assignmentTargetLabel(a) {
     if (!a.studentIds?.length) return '우리 반 전체';
@@ -1018,10 +1139,12 @@ export async function renderTeacher(app, view) {
     const d = assignmentDraft;
     return `
       <div class="page-head">
-        <div><h1 class="page-title">🧑‍🏫 교사 관리자</h1><p class="page-sub">학습지와 과제를 올리면 학생의 미션에 '선생님 과제'로 바로 나타나요. 학생이 풀이를 적고 인증하면 보상을 승인할 수 있어요.</p></div>
+        <div><h1 class="page-title">🧑‍🏫 교사 관리자</h1><p class="page-sub">학생 대시보드로 오늘의 일일 미션·소득세·대출·총 경험치를 한눈에 보고, 재산세 통보와 선생님 과제를 관리해요.</p></div>
         <a class="btn btn-primary" href="#/teacher/missions">제출 답안 확인${st.pendingCount ? ` (${st.pendingCount})` : ''}</a>
       </div>
-      <section class="card" aria-label="선생님 과제 만들기">
+      ${boardHTML()}
+      ${propertyCardHTML()}
+      <section class="card section-gap" aria-label="선생님 과제 만들기">
         <div class="card-head"><h2 class="card-title">＋ 선생님 과제 만들기</h2><span class="muted">게시 즉시 학생에게 배부</span></div>
         <form id="assignment-form">
           <div class="form-grid">
@@ -1075,6 +1198,7 @@ export async function renderTeacher(app, view) {
   }
 
   function bindAssignments() {
+    bindBoard();
     const d = assignmentDraft;
     $('#assignment-title').oninput = (e) => { d.title = e.target.value; };
     $('#assignment-instructions').oninput = (e) => { d.instructions = e.target.value; };

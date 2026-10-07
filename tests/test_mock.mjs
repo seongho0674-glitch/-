@@ -32,7 +32,7 @@ const updateStudent = (changes) => {
 const pdf = `data:application/pdf;base64,${Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF').toString('base64')}`;
 let checks = 0;
 async function check(name, run) {
-  stored = new Map(); failWrites = false; simulatedTime = '2026-10-06T12:00:00';
+  stored = new Map(); failWrites = false; simulatedTime = '2026-10-06T08:30:00';   // 하루 시작(8시) 뒤, 소득세(9시) 전
   resetLocalDB();
   await run();
   checks++;
@@ -60,8 +60,9 @@ await check('class name updates once while all classroom records remain intact',
 
 await check('new shop seeds and legacy migration preserve class records', async () => {
   const seeded = getLocalDB();
-  assert.equal(seeded.version, 3);
-  assert.deepEqual(seeded.items.filter(i => ['학용품', '알림장 면제', '간식 뽑기'].includes(i.name)).map(i => [i.name, i.type, i.price]).sort(), [['간식 뽑기', 'goods', 50], ['알림장 면제', 'coupon', 100], ['학용품', 'goods', 200]]);
+  assert.equal(seeded.version, 4);
+  assert.deepEqual(seeded.items.filter(i => ['학용품', '알림장 면제', '간식 뽑기', '자리 바꾸기 교환권', '숙제 하루 면제 쿠폰'].includes(i.name)).map(i => [i.name, i.price]).sort(),
+    [['간식 뽑기', 200], ['숙제 하루 면제 쿠폰', 200], ['알림장 면제', 100], ['자리 바꾸기 교환권', 500], ['학용품', 400]]);
   const old = createDefaultDB();
   old.version = 2;
   old.items.find(i => i.name === '학용품').name = '캐릭터 연필';
@@ -76,7 +77,8 @@ await check('new shop seeds and legacy migration preserve class records', async 
   old.missions = old.missions.filter(m => m.id !== 'm_teacher');
   saveLocalDB(old);
   const migrated = getLocalDB();
-  assert.equal(migrated.version, 3);
+  assert.equal(migrated.version, 4);
+  assert.deepEqual(['학용품', '알림장 면제', '간식 뽑기'].map(n => migrated.items.find(i => i.name === n).price), [400, 100, 200]);
   assert.equal(migrated.students[0].balance, 789);
   assert.equal(migrated.students[0].exp, 345);
   assert.equal(migrated.students[0].characterLevel, 1);
@@ -156,7 +158,7 @@ await check('assignment answers require content, can retry rejection and earn re
   simulatedTime = '2026-10-07T12:00:00';
   const second = await request(`/student/assignments/${assignment.id}/submit`, 'POST', { answer: '수정 답안' });
   await teacherRequest('/teacher/missions/review', 'POST', { ids: [second.submission.id], action: 'approve' });
-  assert.equal(getLocalDB().students[0].balance, 130);
+  assert.equal(getLocalDB().students[0].balance, 110);   // 100 − 소득세 2일(6·7일 접속) + 보상 30
   assert.equal(getLocalDB().students[0].exp, 180);
   await assert.rejects(teacherRequest('/teacher/missions/review', 'POST', { ids: [second.submission.id], action: 'approve' }), /이미 처리/);
   simulatedTime = '2026-10-08T12:00:00';
@@ -166,7 +168,7 @@ await check('assignment answers require content, can retry rejection and earn re
   db.submissions.push({ ...second.submission, id: 'duplicate_pending', status: 'pending' });
   saveLocalDB(db);
   await teacherRequest('/teacher/missions/review', 'POST', { ids: ['duplicate_pending'], action: 'approve' });
-  assert.equal(getLocalDB().students[0].balance, 130);
+  assert.equal(getLocalDB().students[0].balance, 100);   // 8일 접속 소득세 10만 빠지고 중복 보상은 없음
   assert.equal(getLocalDB().submissions.find(s => s.id === 'duplicate_pending').status, 'rejected');
 });
 
@@ -194,26 +196,111 @@ await check('archiving keeps history and PDF for teacher while ending new studen
   assert.equal(getLocalDB().students[0].balance, 112);
 });
 
-await check('taxes enforce daily payment, property threshold and sufficient funds', async () => {
-  await assert.rejects(request('/student/taxes', 'POST', { type: 'property' }), /100코인/);
-  assert.equal((await request('/student/me')).taxInfo.incomePaid, false);
-  const income = await request('/student/taxes', 'POST', { type: 'income' });
-  assert.equal(income.student.balance, 90);
-  assert.equal(income.taxInfo.incomePaid, true);
-  await assert.rejects(request('/student/taxes', 'POST', { type: 'income' }), /이미 납부/);
-  simulatedTime = '2026-10-07T12:00:00';
-  assert.equal((await request('/student/me')).taxInfo.incomePaid, false);
-  updateStudent({ balance: 101 });
-  const property = await request('/student/taxes', 'POST', { type: 'property' });
-  assert.equal(property.student.balance, 91);
-  assert.equal(property.taxInfo.propertyPaid, true);
-  assert.equal(property.taxInfo.propertyDue, false);
-  updateStudent({ balance: 500 });
-  await assert.rejects(request('/student/taxes', 'POST', { type: 'property' }), /이미 납부/);
-  updateStudent({ balance: 9 });
-  await assert.rejects(request('/student/taxes', 'POST', { type: 'income' }), /부족/);
-  assert.equal(getLocalDB().students[0].balance, 9);
-  assert.equal(getLocalDB().transactions.filter(t => t.type === 'tax').length, 2);
+await check('income tax is automatic at 9 on days the student opened the app and may go below zero', async () => {
+  updateStudent({ balance: 5 });
+  let me = await request('/student/me');                    // 8:30 접속 → 아직 9시 전
+  assert.equal(me.taxInfo.incomeStatus, 'scheduled');
+  assert.equal(me.student.balance, 5);
+  await assert.rejects(request('/student/taxes', 'POST', { type: 'income' }), /자동/);
+  simulatedTime = '2026-10-06T09:05:00';
+  me = await request('/student/me');
+  assert.equal(me.taxInfo.incomeStatus, 'paid');
+  assert.equal(me.student.balance, -5);                      // 모자라도 걷고 마이너스(대출)
+  const taxes = () => getLocalDB().transactions.filter(t => t.type === 'tax' && t.taxType === 'income');
+  assert.deepEqual(taxes().map(t => [t.studentId, t.createdAt, t.amount]), [['s_1', '2026-10-06T09:00:00', 10]]);
+  await request('/student/me');                              // 같은 날 다시 와도 한 번만
+  simulatedTime = '2026-10-07T07:50:00';                     // 아침 8시 전은 아직 6일
+  assert.equal((await request('/student/me')).taxInfo.date, '2026-10-06');
+  simulatedTime = '2026-10-09T10:00:00';                     // 7·8일은 접속 기록이 없으니 걷지 않음
+  await teacherRequest('/teacher/state');
+  assert.equal(taxes().length, 1);
+  me = await request('/student/me');                         // 9일 10시 첫 접속 → 그때 걷는다
+  assert.equal(me.student.balance, -15);
+  assert.equal(taxes().at(-1).createdAt, '2026-10-09T10:00:00');
+  simulatedTime = '2026-10-10T08:10:00';
+  await request('/student/me', 'GET', null, student2);       // 2번은 8시 10분에만 접속
+  simulatedTime = '2026-10-10T09:30:00';
+  await teacherRequest('/teacher/state');                    // 다른 요청이 와도 9시 몫이 걷힌다
+  assert.deepEqual(taxes().filter(t => t.studentId === 's_2').map(t => t.createdAt), ['2026-10-10T09:00:00']);
+  assert.equal(taxes().filter(t => t.studentId === 's_3').length, 0);
+});
+
+await check('daily missions and the luck game count reset at 8 in the morning', async () => {
+  simulatedTime = '2026-10-06T21:00:00';
+  await request('/student/missions', 'POST', { missionId: 'm_notice' });
+  simulatedTime = '2026-10-07T07:59:00';
+  await assert.rejects(request('/student/missions', 'POST', { missionId: 'm_notice' }), /이미 신청/);
+  simulatedTime = '2026-10-07T08:00:00';
+  assert.equal((await request('/student/missions', 'POST', { missionId: 'm_notice' })).ok, true);
+});
+
+await check('teacher sends a property tax notice and students choose whether to pay 10', async () => {
+  updateStudent({ balance: 150 });
+  await assert.rejects(request('/student/taxes', 'POST', { type: 'property' }), /통보가 없어요/);
+  const sent = await teacherRequest('/teacher/property-tax/notify', 'POST');
+  assert.equal(sent.count, 1);                               // 잔액이 100을 넘는 학생만
+  let me = await request('/student/me');
+  assert.deepEqual([me.taxInfo.property.amount, me.taxInfo.property.paid], [10, false]);
+  assert.equal(me.student.balance, 150);                     // 통보만으로는 걷지 않음
+  const paid = await request('/student/taxes', 'POST', { type: 'property' });
+  assert.equal(paid.student.balance, 140);
+  assert.equal(paid.taxInfo.property.paid, true);
+  await assert.rejects(request('/student/taxes', 'POST', { type: 'property' }), /이미 냈어요/);
+  assert.equal((await request('/student/me', 'GET', null, student2)).taxInfo.property, null);
+  const st = await teacherRequest('/teacher/state');
+  assert.deepEqual([st.propertyTax.latest.targets, st.propertyTax.latest.paid], [1, 1]);
+  updateStudent({ balance: 60 });
+  await assert.rejects(teacherRequest('/teacher/property-tax/notify', 'POST'), /대상자가 없어요/);
+});
+
+await check('the fifth luck game of the day adds a 5-coin gambling prevention fee', async () => {
+  updateStudent({ balance: 100 });
+  for (let i = 1; i <= 4; i++) assert.equal((await request('/student/luck', 'POST', { pick: 'odd' })).fine, null);
+  const before = getLocalDB().students[0].balance;
+  const fifth = await request('/student/luck', 'POST', { pick: 'even' });
+  assert.equal(fifth.fine.amount, 5);
+  assert.equal(fifth.student.balance, before + fifth.result.net - 5);
+  assert.equal(fifth.luck.finedToday, true);
+  await assert.rejects(request('/student/luck', 'POST', { pick: 'odd' }), /5번까지/);
+  assert.equal(getLocalDB().transactions.filter(t => t.type === 'fine').length, 1);
+});
+
+await check('invading bought land costs more than twice what the owner paid', async () => {
+  const db = getLocalDB();
+  db.students[1].balance = 2000;
+  saveLocalDB(db);
+  await request('/student/expand-territory', 'POST', null, student2);      // 2번: 시작 도시에 200코인으로 1칸
+  const city = getLocalDB().students[1].homeCity;
+  updateStudent({ balance: 1000 });
+  const owner = (await request('/world/cities')).cities.find(c => c.id === city).residents.find(r => r.id === 's_2');
+  assert.deepEqual([owner.bought, owner.paid, owner.invadeCost], [1, 200, 401]);
+  await assert.rejects(request('/student/invade', 'POST', { cityId: city, targetId: 's_1' }), /내 영토/);
+  const won = await request('/student/invade', 'POST', { cityId: city, targetId: 's_2' });
+  assert.deepEqual([won.transaction.amount, won.tiles], [401, 1]);
+  let now = getLocalDB();
+  assert.deepEqual([now.students[1].claimedCityTiles[city], now.students[1].claimedTiles], [6, 6]);   // 시작 6칸은 그대로
+  assert.deepEqual([now.students[0].claimedCityTiles[city], now.students[0].landBought[city]], [1, { tiles: 1, paid: 401 }]);
+  assert.ok(now.students[0].claimedCities.includes(city));
+  assert.ok(now.transactions.some(t => t.type === 'invaded' && t.studentId === 's_2' && t.tiles === 1));
+  await assert.rejects(request('/student/invade', 'POST', { cityId: city, targetId: 's_2' }), /침공할 수 있는 영토가 없어요/);
+  const back = await request('/student/invade', 'POST', { cityId: city, targetId: 's_1' }, student2);   // 되찾으려면 2×401+1
+  assert.equal(back.transaction.amount, 803);
+  now = getLocalDB();
+  assert.equal(now.students[0].claimedCityTiles[city], undefined);
+  assert.ok(!now.students[0].claimedCities.includes(city));
+  const st = await teacherRequest('/teacher/state');
+  const row = (id) => st.dailyBoard.rows.find(r => r.id === id);
+  assert.deepEqual([row('s_1').territoryCoins, row('s_1').levelupCoins, row('s_1').totalXp], [401, 0, 401]);
+  assert.deepEqual([row('s_2').territoryCoins, row('s_2').totalXp], [1003, 1003]);
+});
+
+await check('teacher dashboard shows today daily missions, access and income tax', async () => {
+  await request('/student/missions', 'POST', { missionId: 'm_notice' });
+  const st = await teacherRequest('/teacher/state');
+  assert.deepEqual(st.dailyBoard.missions.map(m => m.id), ['m_role', 'm_notice', 'm_supplies']);
+  const row = st.dailyBoard.rows.find(r => r.id === 's_1');
+  assert.deepEqual([row.missions.m_notice, row.missions.m_supplies, row.seen, row.incomeTax], ['pending', 'none', true, 'scheduled']);
+  assert.equal(st.dailyBoard.rows.find(r => r.id === 's_2').seen, false);
 });
 
 await check('character costs form 10 to 1000 progression without changing XP', async () => {

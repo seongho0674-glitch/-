@@ -20,9 +20,20 @@ export function fmtDate(iso, withTime = true) {
   if (!withTime) return base;
   return `${base} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+/** 달력 날짜 (거래 내역 날짜 고르기, 백업 파일 이름) */
 export function todayKey() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return ymd(new Date());
+}
+/** 학급 경제의 하루는 아침 8시에 시작해요 (미션·소득세·행운의 게임 횟수·할 일 체크) */
+export const DAY_START_HOUR = 8;
+export function dayKey(d = new Date()) {
+  return ymd(new Date(d.getTime() - DAY_START_HOUR * 3600 * 1000));
+}
+/** 기록 시각이 학급 경제의 어느 하루에 속하는지 */
+export function dayOf(stamp) {
+  const d = new Date(String(stamp || '').slice(0, 19));
+  return isNaN(d) ? String(stamp || '').slice(0, 10) : dayKey(d);
 }
 export function todayLabel() {
   const d = new Date();

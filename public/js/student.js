@@ -2,13 +2,13 @@
 // 학생 화면: 메인 / 미션 / 세계지도 / 상점 / 행운의 게임 / 내 기록
 // ==========================================================
 import {
-  $, $$, esc, fmt, fmtDate, todayKey, todayLabel, api, logout, toast,
+  $, $$, esc, fmt, fmtDate, dayKey, dayOf, todayLabel, api, logout, toast,
   avatar, openModal, confirmModal, countUp, coinBurst, celebrateLevelUp, loadingHTML,
   getAssignmentPdfUrl, openAssignmentPdf,
 } from './core.js';
-import { createWorldMap, openCityModal, cityKind, inContinent, coordText, CONTINENT_NAMES, KIND_LABEL } from './world3d.js';
+import { createWorldMap, openCityModal, cityKind, inContinent, coordText, CONTINENT_NAMES, KIND_LABEL, zoneBarHTML } from './world3d.js';
 
-const TX_ICON = { give: '🎁', take: '⚠️', buy: '🛍️', luck: '🍀', class: '🏃', tax: '🏛️', upgrade: '🐾', territory: '🗺️' };
+const TX_ICON = { give: '🎁', take: '⚠️', buy: '🛍️', luck: '🍀', class: '🏃', tax: '🏛️', upgrade: '🐾', territory: '🗺️', fine: '🎓', invade: '⚔️', invaded: '🛡️' };
 const isPlus = (t) => t.type === 'give' || (t.type === 'luck' && t.win);
 const CONTINENT_FILTERS = [['all', '전체'], ['asia', '아시아'], ['europe', '유럽'], ['americas', '아메리카'], ['africa', '아프리카'], ['oceania', '오세아니아']];
 const DEFAULT_ANIMAL = { name: '모리', species: '여우', emoji: '🦊', title: '숲의 수호자' };
@@ -84,7 +84,7 @@ export async function renderStudent(app, view) {
     return 'none';
   }
   const roleMission = () => missions().find((m) => m.kind === 'role') || null;
-  const todayMissionCoins = () => [...(me.mySubmissions || []), ...(me.myAssignmentSubmissions || []).filter((x) => (x.reviewedAt || '').startsWith(todayKey()))].filter((x) => x.status === 'approved').reduce((a, x) => a + x.reward, 0);
+  const todayMissionCoins = () => [...(me.mySubmissions || []), ...(me.myAssignmentSubmissions || []).filter((x) => x.reviewedAt && dayOf(x.reviewedAt) === dayKey())].filter((x) => x.status === 'approved').reduce((a, x) => a + x.reward, 0);
 
   // ---------- 메인 ----------
   function homeView() {
@@ -108,11 +108,13 @@ export async function renderStudent(app, view) {
         </div>
       </div>
 
+      ${debtBannerHTML()}
+      ${invadedNoticeHTML()}
       ${voteOpen ? `<a class="vote-banner" href="#goal-card" id="vote-banner">${voteBannerInner()}</a>` : ''}
 
       <section class="student-hero">
         <article class="card balance-card" aria-label="내 잔액">
-          <div class="balance-top"><span class="card-label">💰 내 잔액</span></div>
+          <div class="balance-top"><span class="card-label">💰 내 잔액</span>${s.balance < 0 ? '<span class="debt-pill">🚨 대출 중</span>' : ''}</div>
           <div class="balance-amount">
             <span class="coin" aria-hidden="true">🪙</span>
             <span><span class="big-number ${s.balance < 0 ? 'negative' : ''}" id="balance-num" data-from="${lastBalance ?? 0}">${fmt(s.balance)}</span><span class="unit">${cur()}</span></span>
@@ -194,17 +196,60 @@ export async function renderStudent(app, view) {
       </section>`;
   }
 
+  /** 잔액이 마이너스면: 대출을 갚으세요 */
+  function debtBannerHTML() {
+    const b = me.student.balance;
+    if (b >= 0) return '';
+    return `<div class="debt-banner" role="alert" id="debt-banner">
+      <span class="debt-icon" aria-hidden="true">🚨</span>
+      <div>
+        <b>대출을 갚으세요!</b>
+        <p>지금 잔액이 <b class="minus">${fmt(b)} ${cur()}</b>이에요. 모자란 만큼 반에서 빌려 쓴 빚(대출)이에요. 미션으로 ${cur()}을 모아 0 이상으로 만들어 주세요.</p>
+      </div>
+      <a class="btn btn-primary btn-sm" href="#/student/missions">🎯 미션 하러 가기</a>
+    </div>`;
+  }
+
+  /** 오늘(아침 8시 기준) 내 영토를 침공당했으면 알려 준다 */
+  function invadedNoticeHTML() {
+    const hits = (me.transactions || []).filter((t) => t.type === 'invaded' && dayOf(t.createdAt) === dayKey());
+    if (!hits.length) return '';
+    return `<a class="invaded-banner" href="#/student/world" id="invaded-banner">
+      <span aria-hidden="true">🛡️</span>
+      <span>${hits.slice(0, 2).map((t) => esc(t.reason.replace(/^🛡️\s*/, ''))).join(' · ')}${hits.length > 2 ? ` 외 ${hits.length - 2}건` : ''}</span>
+      <span class="invaded-go">세계지도 보기 →</span>
+    </a>`;
+  }
+
   function taxCardHTML() {
     const tax = me.taxInfo || {};
     const balance = me.student.balance;
-    return `<article class="card" aria-label="오늘의 세금">
-      <div class="card-head"><h2 class="card-title">🏛️ 오늘의 세금</h2><span class="tag">하루 한 번</span></div>
-      <p class="muted">소득세는 매일 10 ${cur()}, 재산세는 잔액이 100 ${cur()}을 넘으면 10 ${cur()}을 납부해요.</p>
-      <div class="economy-actions">
-        <button class="btn btn-primary" data-tax="income" ${tax.incomePaid || balance < 10 ? 'disabled' : ''}>${tax.incomePaid ? '✅ 소득세 납부 완료' : `소득세 10 ${cur()} 납부`}</button>
-        <button class="btn" data-tax="property" ${tax.propertyPaid || !tax.propertyDue ? 'disabled' : ''}>${tax.propertyPaid ? '✅ 재산세 납부 완료' : `재산세 10 ${cur()} 납부`}</button>
+    const incomeAmt = tax.incomeTax ?? 10;
+    const hour = tax.incomeHour ?? 9;
+    const start = tax.dayStartHour ?? 8;
+    const income = tax.incomeStatus === 'paid'
+      ? `<span class="tax-state ok">✅ 오늘 소득세 ${fmt(incomeAmt)} ${cur()}을 냈어요</span>`
+      : tax.incomeStatus === 'scheduled'
+        ? `<span class="tax-state wait">⏰ 오늘 아침 ${hour}시에 ${fmt(incomeAmt)} ${cur()}이 자동으로 걷혀요</span>`
+        : `<span class="tax-state">오늘은 아직 접속 기록이 없어요</span>`;
+    const p = tax.property;
+    const pAmt = p?.amount ?? tax.propertyTax ?? 10;
+    let property;
+    if (!p) property = `<span class="tax-state">받은 재산세 통보가 없어요</span>`;
+    else if (p.paid) property = `<span class="tax-state ok">✅ 이번 통보의 재산세 ${fmt(pAmt)} ${cur()}을 냈어요</span>`;
+    else property = `<span class="tax-state notice">📮 선생님이 ${fmtDate(p.createdAt, false)}에 재산세를 통보했어요 · 낼지 말지 골라요</span>
+        <button class="btn btn-primary btn-sm" data-tax="property" ${balance < pAmt ? 'disabled' : ''}>재산세 ${fmt(pAmt)} ${cur()} 내기</button>`;
+    return `<article class="card tax-card" aria-label="오늘의 세금">
+      <div class="card-head"><h2 class="card-title">🏛️ 오늘의 세금</h2><span class="tag">하루는 아침 ${start}시에 시작</span></div>
+      <div class="tax-row">
+        <div class="tax-name"><b>소득세</b><small>접속한 날 아침 ${hour}시에 ${fmt(incomeAmt)} ${cur()} 자동 납부</small></div>
+        <div class="tax-status">${income}</div>
       </div>
-      <p class="hint">${balance < 10 && !tax.incomePaid ? '소득세를 낼 코인이 부족해요. 미션으로 코인을 모아 주세요.' : !tax.propertyDue && !tax.propertyPaid ? '현재 잔액은 재산세 납부 대상이 아니에요.' : '납부 내역은 내 기록에 남아요.'}</p>
+      <div class="tax-row">
+        <div class="tax-name"><b>재산세</b><small>잔액이 ${fmt(tax.propertyThreshold ?? 100)} ${cur()}보다 많을 때 선생님이 통보 · 선택해서 내요</small></div>
+        <div class="tax-status">${property}</div>
+      </div>
+      <p class="hint">${balance < 0 ? `잔액이 마이너스예요. 소득세는 모자라도 걷혀서 빚(대출)이 돼요.` : p && !p.paid && balance < pAmt ? `재산세를 내려면 ${fmt(pAmt - balance)} ${cur()}이 더 필요해요.` : '접속하지 않은 날은 소득세를 걷지 않아요. 납부 내역은 내 기록에 남아요.'}</p>
     </article>`;
   }
 
@@ -233,12 +278,15 @@ export async function renderStudent(app, view) {
   async function spendEconomy(kind, taxType) {
     if (economyBusy) return;
     const s = me.student;
-    const cost = kind === 'tax' ? 10 : kind === 'upgrade' ? s.nextUpgradeCost : s.nextTerritoryCost;
-    const label = kind === 'tax' ? (taxType === 'income' ? '소득세 납부' : '재산세 납부') : kind === 'upgrade' ? '캐릭터 레벨업' : '영토 1칸 확장';
+    const cost = kind === 'tax' ? (me.taxInfo?.property?.amount ?? 10) : kind === 'upgrade' ? s.nextUpgradeCost : s.nextTerritoryCost;
+    const label = kind === 'tax' ? '재산세 납부' : kind === 'upgrade' ? '캐릭터 레벨업' : '영토 1칸 확장';
     let pendingButtons = [];
     economyBusy = true;
     try {
-      const ok = await confirmModal({ emoji: kind === 'tax' ? '🏛️' : '🐾', title: label, html: `${fmt(cost)} ${cur()}을 사용해 ${label}할까요?`, okText: label });
+      const html = kind === 'tax'
+        ? `선생님의 재산세 통보에 따라 <b>${fmt(cost)} ${cur()}</b>을 낼까요?<br><span class="muted">재산세는 골라서 내는 세금이에요. 낸 세금은 우리 반 살림에 쓰여요.</span>`
+        : `${fmt(cost)} ${cur()}을 사용해 ${label}할까요?`;
+      const ok = await confirmModal({ emoji: kind === 'tax' ? '🏛️' : '🐾', title: label, html, okText: label });
       if (!ok) return;
       pendingButtons = $$('[data-tax], [data-economy]').map((button) => [button, button.disabled]);
       pendingButtons.forEach(([button]) => { button.disabled = true; });
@@ -302,7 +350,7 @@ export async function renderStudent(app, view) {
     const voteOpen = v?.status === 'open';
     const needed = Math.ceil((g.studentCount * g.passRate) / 100);
     const spendPct = g.total > 0 ? Math.min(100, Math.round((g.goal / g.total) * 100)) : 100;
-    const closedToday = v && v.closedAt && v.closedAt.slice(0, 10) === todayKey() && ['passed', 'failed'].includes(v.status);
+    const closedToday = v && v.closedAt && dayOf(v.closedAt) === dayKey() && ['passed', 'failed'].includes(v.status);
     const pill = voteOpen ? ['k-friend', '🗳️ 회의 중'] : g.ready ? ['k-mine', '🎉 목표 달성'] : ['k-empty', `${pct}%`];
     return `
       <div class="card-head">
@@ -332,7 +380,7 @@ export async function renderStudent(app, view) {
   function roleTasksHTML() {
     const s = me.student;
     const role = me.role;
-    const doneKey = `cm_tasks_${s.id}_${todayKey()}`;
+    const doneKey = `cm_tasks_${s.id}_${dayKey()}`;
     const done = new Set(JSON.parse(localStorage.getItem(doneKey) || '[]'));
     const rm = roleMission();
     const st = rm ? missionState(rm) : null;
@@ -553,9 +601,12 @@ export async function renderStudent(app, view) {
       return `<div class="empty card"><span class="emo">🍀</span>행운의 게임을 하려면 선생님이 교실 서버를 새 버전으로 다시 켜야 해요.</div>`;
     }
     const canPay = me.student.balance >= L.bet + L.fee;
+    const fine = L.fine ?? 5;
     const block = !L.enabled ? '선생님이 지금은 행운의 게임을 쉬게 했어요.'
-      : L.remaining <= 0 ? `오늘은 ${L.daily}번을 다 했어요. 내일 다시 만나요!`
+      : L.remaining <= 0 ? `오늘은 ${L.daily}번을 다 했어요. 내일 아침 8시에 다시 만나요!`
         : !canPay ? `${me.settings.currencyName}이(가) 부족해요. 한 번 하려면 ${L.bet + L.fee} ${me.settings.currencyName}이 필요해요.` : '';
+    const lastWarn = !block && L.remaining === 1 && !L.finedToday
+      ? `⚠️ 이번이 오늘 ${L.daily}번째예요. 하고 나면 도박 예방 교육비 ${fmt(fine)} ${me.settings.currencyName}을 내야 해요.` : '';
     return `
       <div class="page-head">
         <div>
@@ -573,7 +624,7 @@ export async function renderStudent(app, view) {
         <section class="card luck-stage" aria-label="홀짝 게임">
           <div class="luck-hand" id="luck-hand" aria-hidden="true">✊</div>
           <div class="luck-marbles" id="luck-marbles" aria-hidden="true"></div>
-          <div class="luck-result" id="luck-result" role="status">${block || '홀과 짝 중 하나를 골라 보세요'}</div>
+          <div class="luck-result ${lastWarn ? 'warn' : ''}" id="luck-result" role="status">${block || lastWarn || '홀과 짝 중 하나를 골라 보세요'}</div>
           <div class="luck-picks">
             <button type="button" class="luck-pick odd" data-pick="odd" ${block ? 'disabled' : ''}><b>홀</b><small>1 · 3 · 5 · 7 · 9</small></button>
             <button type="button" class="luck-pick even" data-pick="even" ${block ? 'disabled' : ''}><b>짝</b><small>2 · 4 · 6 · 8 · 10</small></button>
@@ -584,6 +635,7 @@ export async function renderStudent(app, view) {
             <span>맞히면 <b>${fmt(L.bet * 2)}</b> 받기</span>
             <span>오늘 남은 기회 <b id="luck-left">${L.remaining}</b> / ${L.daily}</span>
           </div>
+          <p class="luck-fine-rule">🎓 하루 ${L.daily}번을 모두 하면 <b>도박 예방 교육비 ${fmt(fine)} ${cur()}</b>을 벌금처럼 내요${L.finedToday ? ' · <b class="minus">오늘 냈어요</b>' : ''}. 모자라면 빚(대출)이 돼요.</p>
         </section>
 
         <aside class="luck-side">
@@ -624,6 +676,17 @@ export async function renderStudent(app, view) {
 
   async function playLuck(pick) {
     if (luckBusy) return;
+    const L0 = me.luck;
+    if (L0 && L0.remaining === 1 && !L0.finedToday) {
+      luckBusy = true;
+      const ok = await confirmModal({
+        emoji: '🎓', title: `오늘 ${L0.daily}번째 게임`,
+        html: `이번 게임을 하면 오늘 ${L0.daily}번을 모두 하게 돼요.<br><b class="minus">도박 예방 교육비 ${fmt(L0.fine ?? 5)} ${cur()}</b>을 벌금처럼 내야 해요.<br><span class="muted">그래도 할까요?</span>`,
+        okText: '그래도 할래요', okClass: 'btn-take',
+      });
+      luckBusy = false;
+      if (!ok) return;
+    }
     luckBusy = true;
     const hand = $('#luck-hand');
     const marbles = $('#luck-marbles');
@@ -647,6 +710,10 @@ export async function renderStudent(app, view) {
       result.innerHTML = win
         ? `🎉 맞혔어요! 구슬 <b>${n}</b>개 (${n % 2 ? '홀' : '짝'}) · ${fmt(bet * 2)} 받고 수수료 ${fmt(fee)} → <b class="plus">+${fmt(net)}</b>`
         : `😢 아쉬워요… 구슬 <b>${n}</b>개 (${n % 2 ? '홀' : '짝'}) · 건 ${fmt(bet)}과 수수료 ${fmt(fee)} → <b class="minus">−${fmt(-net)}</b>`;
+      if (r.fine) {
+        result.insertAdjacentHTML('beforeend', `<br><span class="luck-fine">🎓 오늘 ${r.luck.daily}번을 다 해서 도박 예방 교육비 <b class="minus">−${fmt(r.fine.amount)}</b> ${cur()}을 냈어요</span>`);
+        toast(`🎓 도박 예방 교육비 ${fmt(r.fine.amount)} ${me.settings.currencyName}을 냈어요. 행운의 게임은 오래 할수록 손해예요!`, 'error');
+      }
       me.student = r.student;
       me.luck = r.luck;
       lastBalance = me.student.balance;
@@ -664,7 +731,8 @@ export async function renderStudent(app, view) {
       const L = me.luck;
       const off = !L.enabled || L.remaining <= 0 || me.student.balance < L.bet + L.fee;
       picks.forEach((b) => { b.disabled = off; b.classList.remove('chosen'); });
-      if (off && L.remaining <= 0) result.insertAdjacentHTML('beforeend', `<br><small class="muted">오늘 기회를 다 썼어요. 내일 다시 만나요!</small>`);
+      if (off && L.remaining <= 0) result.insertAdjacentHTML('beforeend', `<br><small class="muted">오늘 기회를 다 썼어요. 내일 아침 8시에 다시 만나요!</small>`);
+      else if (!off && L.remaining === 1 && !L.finedToday) result.insertAdjacentHTML('beforeend', `<br><small class="luck-fine">⚠️ 다음이 오늘 ${L.daily}번째예요. 하고 나면 도박 예방 교육비 ${fmt(L.fine ?? 5)} ${cur()}을 내요.</small>`);
       luckBusy = false;
     }
   }
@@ -676,7 +744,7 @@ export async function renderStudent(app, view) {
         <div class="world-head">
           <div>
             <h1 class="page-title">🌍 우리 반 세계지도</h1>
-            <p class="page-sub">지구본을 돌리거나 평면 세계지도로 바꿔 21개 도시를 찾아보세요. 나라 위에 마우스를 올리면 나라 이름이 나와요!</p>
+            <p class="page-sub">21개 도시는 저마다 하나의 도시 국가예요. 영토 칸이 늘면 지도 위 색칠한 땅이 넓어지고(점선은 도시 국가의 경계), 친구가 ${cur()}으로 넓힌 땅은 침공할 수도 있어요.</p>
           </div>
         </div>
         <div class="world-layout">
@@ -754,11 +822,13 @@ export async function renderStudent(app, view) {
             ${res.slice(0, 7).map((r) => `<span class="res-chip ${r.id === s.id ? 'me' : ''}" title="${esc(r.animal?.name || '동물 친구')}">${r.animal?.emoji || '🐾'}</span>`).join('')}
             ${res.length > 7 ? `<span class="res-more">+${res.length - 7}</span>` : ''}
           </div>` : ''}
+        ${zoneBarHTML(c, s.id)}
         <div class="ws-actions">
           <button type="button" class="btn btn-primary btn-sm" data-act="detail">🔍 자세히 보기</button>
           ${kind === 'mine'
             ? '<span class="ws-owned">🚩 내 영토예요</span>'
             : `<button type="button" class="btn btn-gold btn-sm" data-act="claim">🚩 ${fmt(s.nextTerritoryCost)} ${cur()}로 1칸 개척</button>`}
+          ${invadeTargets(c).length ? `<button type="button" class="btn btn-take btn-sm" data-act="invade">⚔️ 침공하기 · ${fmt(Math.min(...invadeTargets(c).map((r) => Number(r.invadeCost))))} ${cur()}부터</button>` : ''}
         </div>
       </section>`;
   }
@@ -777,12 +847,17 @@ export async function renderStudent(app, view) {
     if (focusKey) side.querySelector(focusKey)?.focus();
   }
 
-  function openDetail(c) {
+  /** 이 도시에서 침공할 수 있는 친구 땅 (친구가 코인으로 넓힌 땅만) */
+  const invadeTargets = (c) => (c.residents || []).filter((r) => r.id !== me.student.id && Number(r.invadeCost) > 0);
+
+  function openDetail(c, tab = 'landmark') {
     openCityModal(c, {
       currentStudent: me.student,
       currencyName: me.settings.currencyName,
       claimCost: me.student.nextTerritoryCost,
       onClaimCity: handleClaimCity,
+      onInvade: handleInvade,
+      tab,
     });
   }
 
@@ -824,6 +899,7 @@ export async function renderStudent(app, view) {
       if (!act || !c) return;
       if (act.dataset.act === 'detail') openDetail(c);
       else if (act.dataset.act === 'claim') handleClaimCity(c);
+      else if (act.dataset.act === 'invade') openDetail(c, 'animals');
     });
   }
 
@@ -912,8 +988,10 @@ export async function renderStudent(app, view) {
             <div class="tx-reason">${esc(t.reason)}</div>
             <div class="tx-meta">${fmtDate(t.createdAt)}</div>
           </div>
-          <div class="tx-amount ${plus ? 'plus' : 'minus'}">${plus ? '+' : '−'}${fmt(t.amount)}
-            <small>잔액 ${fmt(t.balanceAfter)}</small></div>
+          ${t.type === 'invaded'
+            ? `<div class="tx-amount minus">영토 −${fmt(t.tiles)}칸<small>잔액 ${fmt(t.balanceAfter)}</small></div>`
+            : `<div class="tx-amount ${plus ? 'plus' : 'minus'}">${plus ? '+' : '−'}${fmt(t.amount)}
+            <small>잔액 ${fmt(t.balanceAfter)}</small></div>`}
         </div>`;
     }).join('')}</div>`;
   }
@@ -1032,9 +1110,45 @@ export async function renderStudent(app, view) {
     }
   }
 
+  // 침공: 친구가 코인으로 넓힌 땅을, 친구가 낸 코인의 2배보다 많이 내고 차지한다
+  async function handleInvade(city, target) {
+    const s = me.student;
+    const cn = me.settings.currencyName;
+    const cost = Number(target.invadeCost);
+    if (s.balance < cost) {
+      toast(`${cn}이(가) ${fmt(cost - s.balance)}만큼 더 필요해요. (침공 비용 ${fmt(cost)} ${cn})`, 'error');
+      return;
+    }
+    const ok = await confirmModal({
+      emoji: '⚔️',
+      title: `${city.name} 침공`,
+      html: `<b>${esc(target.name)}</b>의 ${esc(city.name)} 땅 <b>${fmt(target.bought)}칸</b>을 침공할까요?<br>
+             <span class="muted">${esc(target.name)}이(가) 이 땅에 낸 ${cur()}: ${fmt(target.paid)} → 2배보다 많이 내야 해요</span><br>
+             <span class="gold">필요한 ${cur()}: ${fmt(cost)}</span> (지금 ${fmt(s.balance)} ${cur()})<br>
+             <span class="minus">낸 ${cur()}은 돌려받지 못하고, 친구도 나중에 내 땅을 다시 침공할 수 있어요.</span>`,
+      okText: '침공하기!',
+      okClass: 'btn-take',
+    });
+    if (!ok) return;
+    try {
+      const res = await api('/student/invade', { method: 'POST', body: { cityId: city.id, targetId: target.id } });
+      coinBurst(innerWidth / 2, innerHeight / 2, 18, '⚔️');
+      toast(res.message || `${city.name} 땅을 차지했어요! ⚔️`);
+      me = await api('/student/me');
+      worldData = await api('/world/cities');
+      selectedCityId = city.id;
+      if (view === 'world' && worldMap) {
+        refreshWorldInPlace();
+        worldMap.select(city.id, { fly: false });
+      } else paint();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
   function bindTasks() {
     const s = me.student;
-    const key = `cm_tasks_${s.id}_${todayKey()}`;
+    const key = `cm_tasks_${s.id}_${dayKey()}`;
     const btn = $('#role-mission-btn');
     if (btn) btn.onclick = () => { const m = roleMission(); if (m) submitMission(m); };
     $$('.task-item').forEach((el) => {
@@ -1101,7 +1215,7 @@ export async function renderStudent(app, view) {
     return JSON.stringify([g.total, g.goal, g.vote && [g.vote.yes, g.vote.no, g.vote.status]]);
   }
   function worldSignature(d) {
-    return JSON.stringify((d?.cities || []).map((c) => [c.id, (c.residents || []).map((r) => `${r.id}:${r.level}:${r.animal?.emoji}`)]));
+    return JSON.stringify((d?.cities || []).map((c) => [c.id, (c.residents || []).map((r) => `${r.id}:${r.level}:${r.animal?.emoji}:${r.tiles}:${r.bought}:${r.invadeCost}`)]));
   }
 
   // 새로 받은 화폐 알림

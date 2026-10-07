@@ -174,14 +174,14 @@ def seed_db():
         for e, n, t in roles_seed
     ]
     items_seed = [
-        ("🪑", "자리 바꾸기 교환권", "coupon", 150, SEAT_DESC),
+        ("🪑", "자리 바꾸기 교환권", "coupon", 500, SEAT_DESC),
         ("🧑‍🏫", "일일 선생님 쿠폰", "coupon", 120, "아침 활동 시간을 내가 진행해요."),
-        ("📝", "숙제 하루 면제 쿠폰", "coupon", 100, "숙제 한 번을 면제받아요. (선생님 확인 필요)"),
+        ("📝", "숙제 하루 면제 쿠폰", "coupon", 200, "숙제 한 번을 면제받아요. (선생님 확인 필요)"),
         ("🍽️", "급식 먼저 먹기 쿠폰", "coupon", 60, "하루 동안 급식 줄 맨 앞에 서요."),
         ("🎵", "음악 들으며 공부 쿠폰", "coupon", 40, "자습 시간에 이어폰으로 음악을 들어요."),
         ("📒", "알림장 면제", "coupon", 100, "알림장 한 번을 면제받아요. (선생님 확인 필요)"),
-        ("✏️", "학용품", "goods", 200, "학급 상점에서 학용품을 골라요."),
-        ("🍬", "간식 뽑기", "goods", 50, "간식 상자에서 한 개를 골라요."),
+        ("✏️", "학용품", "goods", 400, "학급 상점에서 학용품을 골라요."),
+        ("🍬", "간식 뽑기", "goods", 200, "간식 상자에서 한 개를 골라요."),
     ]
     items = [
         {"id": new_id("i"), "emoji": e, "name": n, "type": t, "price": p,
@@ -194,7 +194,7 @@ def seed_db():
         for i in range(1, 26)
     ]
     db = {
-        "version": 3,
+        "version": 4,
         "settings": {"className": "6학년 4반", "classNameVersion": 1, "currencyName": "코인", "teacherPin": "0000",
                      "pinDefaultVersion": 1,
                      "luckEnabled": True, "peGoalDays": 10},
@@ -207,6 +207,7 @@ def seed_db():
         "assignments": [],
         "vote": None,
         "peEvents": [],
+        "propertyNotices": [],
     }
     apply_class_roster(db)
     return db
@@ -238,6 +239,14 @@ ITEM_PRICE_UPDATE = {
     "간식 뽑기": (15, 20),
 }
 
+PRICE_UPDATE_V4 = {"자리 바꾸기 교환권": 500, "학용품": 400, "간식 뽑기": 200, "숙제 하루 면제 쿠폰": 200}
+
+DAY_START_HOUR = 8         # 미션·소득세·행운의 게임 횟수는 매일 아침 8시에 새로 시작
+INCOME_TAX = 10            # 소득세: 접속한 날 아침 9시에 자동으로 걷는다 (모자라면 마이너스 = 대출)
+INCOME_TAX_HOUR = 9
+PROPERTY_TAX = 10          # 재산세: 선생님이 통보하면 학생이 골라서 낸다
+PROPERTY_THRESHOLD = 100   # 잔액이 이보다 많으면 재산세 통보 대상
+LUCK_FINE = 5              # 행운의 게임을 하루 5번 다 하면 도박 예방 교육비 (벌금)
 LUCK_BET = 10        # 행운의 게임에 거는 화폐 = 기본 미션(1인 1역) 1개 보상
 LUCK_FEE = 1         # 수수료 10% (게임마다 사라짐 → 오래 할수록 줄어들고, 물가 오름도 막음)
 LUCK_DAILY = 5       # 하루에 할 수 있는 횟수
@@ -267,7 +276,7 @@ def migrate_db(db):
     if not isinstance(db.get("missions"), list):
         db["missions"] = seed_missions()
         changed = True
-    for key in ("submissions", "peEvents", "assignments"):
+    for key in ("submissions", "peEvents", "assignments", "propertyNotices"):
         if not isinstance(db.get(key), list):
             db[key] = []
             changed = True
@@ -301,6 +310,28 @@ def migrate_db(db):
         if not any(m.get("id") == "m_teacher" for m in db["missions"]):
             db["missions"].append(next(m for m in seed_missions() if m["id"] == "m_teacher"))
         db["version"] = 3
+        changed = True
+    if int(db.get("version", 1)) < 4:
+        # 상점 가격 조정 (선생님 요청: 자리 바꾸기 500, 학용품 400, 간식 뽑기 200, 숙제 면제 200)
+        for item in db.get("items", []):
+            if item.get("name") in PRICE_UPDATE_V4:
+                item["price"] = PRICE_UPDATE_V4[item["name"]]
+        # 소득세가 자동으로 바뀌기 전, 오늘 이미 직접 낸 학생은 다시 걷지 않는다
+        for s in db.get("students", []):
+            if "lastIncomeTaxDay" not in s:
+                days = [t.get("date") or day_of(t.get("createdAt", "")) for t in db.get("transactions", [])
+                        if t.get("studentId") == s.get("id") and t.get("type") == "tax" and t.get("taxType") == "income"]
+                s["lastIncomeTaxDay"] = max(days) if days else ""
+            if not isinstance(s.get("landBought"), dict):
+                land = {}
+                for t in db.get("transactions", []):
+                    if t.get("studentId") == s.get("id") and t.get("type") == "territory":
+                        city = t.get("cityId") or s.get("homeCity", "seoul")
+                        rec = land.setdefault(city, {"tiles": 0, "paid": 0})
+                        rec["tiles"] += 1
+                        rec["paid"] += int(t.get("amount", 0))
+                s["landBought"] = land
+        db["version"] = 4
         changed = True
     if int(st.get("pinDefaultVersion", 0)) < 1:
         # 학생 첫 PIN을 0000으로 통일: 예전 기본값(1234) 그대로인 학생만 바꾼다 (한 번만)
@@ -709,6 +740,9 @@ def ensure_student_fields(db):
         if "friends" not in s or not isinstance(s.get("friends"), list):
             s["friends"] = p["friends"]
             changed = True
+        if not isinstance(s.get("landBought"), dict):
+            s["landBought"] = {}   # 도시별로 코인을 내고 얻은 영토 {도시: {"tiles": 칸, "paid": 낸 코인}}
+            changed = True
     if changed:
         save_db(db)
 
@@ -1038,10 +1072,11 @@ def student_addresses(ctx):
 
 def api_teacher_state(ctx):
     today = today_str()
-    given = sum(t["amount"] for t in DB["transactions"] if t["type"] == "give" and t["createdAt"].startswith(today))
-    taken = sum(t["amount"] for t in DB["transactions"] if t["type"] == "take" and t["createdAt"].startswith(today))
-    bought = sum(1 for t in DB["transactions"] if t["type"] == "buy" and t["createdAt"].startswith(today))
-    luck_today = [t for t in DB["transactions"] if t["type"] == "luck" and t["createdAt"].startswith(today)]
+    todays = [t for t in DB["transactions"] if day_of(t["createdAt"]) == today]
+    given = sum(t["amount"] for t in todays if t["type"] == "give")
+    taken = sum(t["amount"] for t in todays if t["type"] == "take")
+    bought = sum(1 for t in todays if t["type"] == "buy")
+    luck_today = [t for t in todays if t["type"] == "luck"]
     return {
         "settings": {**public_settings(), "defaultPin": DB["settings"]["teacherPin"] == DEFAULT_TEACHER_PIN,
                      "mustChangePin": must_change_teacher_pin(), "cloud": CLOUD,
@@ -1058,6 +1093,8 @@ def api_teacher_state(ctx):
         "luck": {"todayPlays": len(luck_today), "todayFees": sum(t.get("fee", 0) for t in luck_today),
                  **class_luck_totals()},
         "addresses": student_addresses(ctx),   # 학생 기기에서 접속할 주소
+        "dailyBoard": daily_board(),
+        "propertyTax": property_summary(),
     }
 
 
@@ -1329,6 +1366,7 @@ def api_world_cities(ctx):
         for c_id in claimed:
             if c_id in city_map:
                 is_home = (c_id == s_home)
+                bought = (s.get("landBought") or {}).get(c_id) or {}
                 city_map[c_id]["residents"].append({
                     "id": s["id"],
                     "number": s["number"],
@@ -1337,7 +1375,10 @@ def api_world_cities(ctx):
                     "characterLevel": int(s.get("characterLevel", 1)),
                     "animal": animal,
                     "isHome": is_home,
-                    "tiles": s.get("claimedCityTiles", {}).get(c_id, tiles if is_home else 3)
+                    "tiles": s.get("claimedCityTiles", {}).get(c_id, tiles if is_home else 3),
+                    "bought": int(bought.get("tiles", 0)),
+                    "paid": int(bought.get("paid", 0)),
+                    "invadeCost": invade_cost(bought) if bought.get("tiles") else None,
                 })
                 city_map[c_id]["totalTiles"] += s.get("claimedCityTiles", {}).get(c_id, tiles if is_home else 3)
 
@@ -1365,6 +1406,7 @@ def api_student_claim_city(ctx):
     claimed.append(city_id)
     s["claimedTiles"] = s.get("claimedTiles", 6) + 1
     s.setdefault("claimedCityTiles", {})[city_id] = 1
+    add_land(s, city_id, 1, tx["amount"])
     s["territoryPurchases"] = purchases + 1
     s["energy"] = max(0, s.get("energy", 2) - 1)
     save_db(DB)
@@ -1376,6 +1418,64 @@ def api_student_claim_city(ctx):
         "transaction": tx,
         "student": student_view(s)
     }
+
+
+def add_land(s, city_id, tiles, paid):
+    rec = s.setdefault("landBought", {}).setdefault(city_id, {"tiles": 0, "paid": 0})
+    rec["tiles"] = int(rec.get("tiles", 0)) + tiles
+    rec["paid"] = int(rec.get("paid", 0)) + int(paid)
+
+
+def invade_cost(bought):
+    """침공하려면 원래 주인이 그 영토에 낸 코인의 2배보다 많이 내야 한다."""
+    return 2 * int(bought.get("paid", 0)) + 1
+
+
+def api_student_invade(ctx):
+    """다른 학생이 코인으로 넓힌 영토를 침공해서 차지한다. 처음 받은 영토(시작 도시 6칸)는 침공할 수 없다."""
+    s = current_student(ctx)
+    body = ctx["body"]
+    city_id = req_str(body, "cityId", "도시 ID", 30)
+    city = next((c for c in CITIES_DATA if c["id"] == city_id), None)
+    if not city:
+        raise ApiError(404, "존재하지 않는 도시예요.")
+    target = find(DB["students"], str(body.get("targetId", "")))
+    if not target:
+        raise ApiError(404, "침공할 친구를 찾을 수 없어요.")
+    if target["id"] == s["id"]:
+        raise ApiError(400, "내 영토는 침공할 수 없어요.")
+    bought = (target.get("landBought") or {}).get(city_id) or {}
+    held = int((target.get("claimedCityTiles") or {}).get(city_id, 0))
+    k = min(int(bought.get("tiles", 0)), held)
+    if k <= 0:
+        raise ApiError(400, "이 도시에는 침공할 수 있는 영토가 없어요. (처음 받은 영토는 지킬 수 있어요)")
+    cost = invade_cost(bought)
+    tx = spend_student(s, cost, "invade", f"⚔️ {target['name']}의 {city['name']} 영토 {k}칸 침공",
+                       cityId=city_id, targetId=target["id"], tiles=k, ownerPaid=int(bought.get("paid", 0)))
+    # 원래 주인: 산 영토를 잃는다 (시작 영토는 그대로)
+    target_tiles = target.setdefault("claimedCityTiles", {})
+    target_tiles[city_id] = held - k
+    target["claimedTiles"] = max(0, int(target.get("claimedTiles", 6)) - k)
+    target["landBought"].pop(city_id, None)
+    if target_tiles[city_id] <= 0 and city_id != target.get("homeCity"):
+        target_tiles.pop(city_id, None)
+        target["claimedCities"] = [c for c in target.get("claimedCities", []) if c != city_id]
+    # 침입자: 영토를 얻고, 이번에 낸 코인이 다음 침공 기준이 된다
+    my_tiles = s.setdefault("claimedCityTiles", {})
+    my_tiles[city_id] = int(my_tiles.get(city_id, 0)) + k
+    s["claimedTiles"] = int(s.get("claimedTiles", 6)) + k
+    if city_id not in s.setdefault("claimedCities", [s.get("homeCity", "seoul")]):
+        s["claimedCities"].append(city_id)
+    add_land(s, city_id, k, cost)
+    DB["transactions"].append({
+        "id": new_id("t"), "studentId": target["id"], "studentName": target["name"], "type": "invaded",
+        "amount": 0, "tiles": k, "cityId": city_id, "attackerId": s["id"],
+        "reason": f"🛡️ {s['name']}에게 {city['name']} 영토 {k}칸을 빼앗겼어요",
+        "balanceAfter": target["balance"], "createdAt": tx["createdAt"],
+    })
+    save_db(DB)
+    return {"ok": True, "message": f"⚔️ {city['name']}에서 {target['name']}의 영토 {k}칸을 차지했어요!",
+            "transaction": tx, "tiles": k, "student": student_view(s)}
 
 
 def api_student_update_animal(ctx):
@@ -1411,29 +1511,169 @@ def spend_student(s, amount, kind, reason, **extra):
     return tx
 
 
+def income_tax_due(day):
+    return datetime.strptime(day, "%Y-%m-%d") + timedelta(hours=INCOME_TAX_HOUR)
+
+
+def charge_income_tax(s, day):
+    """소득세 자동 납부. 잔액이 모자라도 걷어서 마이너스(대출)가 될 수 있다."""
+    due = income_tax_due(day)
+    try:
+        first_seen = datetime.fromisoformat(str(s.get("lastSeenAt") or "")[:19])
+    except ValueError:
+        first_seen = due
+    s["balance"] -= INCOME_TAX
+    DB["transactions"].append({
+        "id": new_id("t"), "studentId": s["id"], "studentName": s["name"], "type": "tax",
+        "taxType": "income", "auto": True, "date": day, "amount": INCOME_TAX,
+        "reason": "소득세 자동 납부 (접속한 날 아침 9시)", "balanceAfter": s["balance"],
+        "createdAt": max(due, first_seen).isoformat(timespec="seconds"),
+    })
+    s["lastIncomeTaxDay"] = day
+
+
+def settle_income_tax(s, now):
+    day = s.get("lastSeenDay")
+    if day and day > (s.get("lastIncomeTaxDay") or "") and now >= income_tax_due(day):
+        charge_income_tax(s, day)
+        return True
+    return False
+
+
+def daily_settlement(session):
+    """요청이 올 때마다: 학생의 오늘 접속을 기록하고, 아침 9시가 지난 날의 소득세를 걷는다.
+    접속 기록이 없는 날은 걷지 않는다. 서버가 쉬던 사이의 몫도 다음 요청 때 정리된다."""
+    now = local_now()
+    today = day_key(now)
+    changed = False
+    for s in DB["students"]:
+        changed = settle_income_tax(s, now) or changed
+    if session and session.get("role") == "student":
+        s = find(DB["students"], session.get("studentId"))
+        if s and s.get("lastSeenDay") != today:
+            s["lastSeenDay"] = today
+            s["lastSeenAt"] = now.isoformat(timespec="seconds")
+            settle_income_tax(s, now)
+            changed = True
+    if changed:
+        save_db(DB)
+
+
+def latest_property_notice():
+    notices = DB.get("propertyNotices") or []
+    return notices[-1] if notices else None
+
+
+def property_info(s):
+    n = latest_property_notice()
+    if not n or s["id"] not in n.get("targets", []):
+        return None
+    return {"id": n["id"], "amount": n["amount"], "createdAt": n["createdAt"], "paid": s["id"] in n.get("paid", {})}
+
+
 def tax_info(s):
     today = today_str()
-    paid = {t.get("taxType") for t in DB["transactions"]
-            if t.get("studentId") == s["id"] and t.get("type") == "tax"
-            and (t.get("date") or t.get("createdAt", "")[:10]) == today}
-    return {"date": today, "incomePaid": "income" in paid, "propertyPaid": "property" in paid,
-            "propertyDue": s["balance"] > 100 and "property" not in paid}
+    paid = s.get("lastIncomeTaxDay") == today
+    seen = s.get("lastSeenDay") == today
+    return {"date": today, "incomeTax": INCOME_TAX, "incomeHour": INCOME_TAX_HOUR, "dayStartHour": DAY_START_HOUR,
+            "incomePaid": paid, "incomeStatus": "paid" if paid else ("scheduled" if seen else "none"),
+            "property": property_info(s), "propertyTax": PROPERTY_TAX, "propertyThreshold": PROPERTY_THRESHOLD}
 
 
 def api_student_tax(ctx):
     s = current_student(ctx)
     kind = ctx["body"].get("type")
-    if kind not in ("income", "property"):
-        raise ApiError(400, "소득세 또는 재산세를 골라 주세요.")
-    info = tax_info(s)
-    if info["incomePaid" if kind == "income" else "propertyPaid"]:
-        raise ApiError(400, "오늘은 이미 납부한 세금이에요.")
-    if kind == "property" and s["balance"] <= 100:
-        raise ApiError(400, "재산세는 잔액이 100코인을 넘을 때 납부해요.")
-    tx = spend_student(s, 10, "tax", "소득세 납부" if kind == "income" else "재산세 납부",
-                       taxType=kind, date=info["date"])
+    if kind == "income":
+        raise ApiError(400, "소득세는 접속한 날 아침 9시에 자동으로 내요.")
+    if kind != "property":
+        raise ApiError(400, "재산세만 직접 낼 수 있어요.")
+    n = latest_property_notice()
+    if not n or s["id"] not in n.get("targets", []):
+        raise ApiError(400, "선생님이 보낸 재산세 통보가 없어요.")
+    paid = n.setdefault("paid", {})
+    if s["id"] in paid:
+        raise ApiError(400, "이번 통보의 재산세는 이미 냈어요.")
+    tx = spend_student(s, n["amount"], "tax", "재산세 납부 (선생님 통보)", taxType="property",
+                       noticeId=n["id"], date=today_str())
+    paid[s["id"]] = tx["createdAt"]
     save_db(DB)
     return {"ok": True, "transaction": tx, "student": student_view(s), "taxInfo": tax_info(s)}
+
+
+def property_summary():
+    eligible = [s for s in sorted_students() if s["balance"] > PROPERTY_THRESHOLD]
+    n = latest_property_notice()
+    latest = None
+    if n:
+        names = {s["id"]: s["name"] for s in DB["students"]}
+        paid = n.get("paid", {})
+        targets = [i for i in n.get("targets", []) if i in names]
+        latest = {"id": n["id"], "createdAt": n["createdAt"], "amount": n["amount"], "targets": len(targets),
+                  "paid": sum(1 for i in targets if i in paid),
+                  "paidNames": [names[i] for i in targets if i in paid],
+                  "unpaidNames": [names[i] for i in targets if i not in paid]}
+    return {"amount": PROPERTY_TAX, "threshold": PROPERTY_THRESHOLD, "eligible": len(eligible),
+            "eligibleNames": [s["name"] for s in eligible], "latest": latest}
+
+
+def api_property_notify(ctx):
+    """선생님이 재산세 납부 대상자(잔액이 100을 넘는 학생)에게 통보한다. 학생은 골라서 낼 수 있다."""
+    targets = [s for s in sorted_students() if s["balance"] > PROPERTY_THRESHOLD]
+    cur = DB["settings"]["currencyName"]
+    if not targets:
+        raise ApiError(400, f"재산세 납부 대상자가 없어요. (잔액이 {PROPERTY_THRESHOLD} {cur}을 넘는 학생이 없어요)")
+    notices = DB.setdefault("propertyNotices", [])
+    notices.append({"id": new_id("p"), "createdAt": now_str(), "day": today_str(), "amount": PROPERTY_TAX,
+                    "threshold": PROPERTY_THRESHOLD, "targets": [s["id"] for s in targets], "paid": {}})
+    del notices[:-30]   # 최근 30번의 통보만 남긴다
+    save_db(DB)
+    return {"ok": True, "count": len(targets), "propertyTax": property_summary()}
+
+
+def growth_totals():
+    """학생별로 영토(확장·개척·침공)와 캐릭터 레벨업에 쓴 코인 → 총 경험치 (1코인 = 1 XP)"""
+    out = {}
+    for t in DB["transactions"]:
+        kind = "territory" if t["type"] in ("territory", "invade") else "levelup" if t["type"] == "upgrade" else None
+        if kind:
+            rec = out.setdefault(t["studentId"], {"territory": 0, "levelup": 0})
+            rec[kind] += int(t.get("amount", 0))
+    for rec in out.values():
+        rec["total"] = rec["territory"] + rec["levelup"]
+    return out
+
+
+def daily_board():
+    """교사용 학생 대시보드: 오늘(아침 8시 기준) 일일 미션·접속·소득세 현황과 총 경험치"""
+    today = today_str()
+    growth = growth_totals()
+    daily = [m for m in DB["missions"] if m.get("daily") and m.get("active", True)]
+    rows = []
+    for s in sorted_students():
+        subs = today_submissions(s["id"])
+        status = {}
+        for m in daily:
+            mine = [x for x in subs if x["missionId"] == m["id"]]
+            if any(x["status"] == "approved" for x in mine):
+                status[m["id"]] = "done"
+            elif any(x["status"] == "pending" for x in mine):
+                status[m["id"]] = "pending"
+            elif m.get("kind") == "role" and not s.get("roleId"):
+                status[m["id"]] = "off"
+            elif any(x["status"] == "rejected" for x in mine):
+                status[m["id"]] = "retry"
+            else:
+                status[m["id"]] = "none"
+        seen = s.get("lastSeenDay") == today
+        g = growth.get(s["id"], {"territory": 0, "levelup": 0, "total": 0})
+        rows.append({"id": s["id"], "number": s["number"], "name": s["name"], "balance": s["balance"],
+                     "missions": status, "done": sum(1 for v in status.values() if v == "done"), "seen": seen,
+                     "incomeTax": "paid" if s.get("lastIncomeTaxDay") == today else ("scheduled" if seen else "none"),
+                     "tiles": int(s.get("claimedTiles", 6)), "characterLevel": int(s.get("characterLevel", 1)),
+                     "territoryCoins": g["territory"], "levelupCoins": g["levelup"], "totalXp": g["total"]})
+    return {"date": today, "dayStartHour": DAY_START_HOUR, "incomeHour": INCOME_TAX_HOUR,
+            "missions": [{"id": m["id"], "emoji": m.get("emoji", "🎯"), "name": m["name"]} for m in daily],
+            "rows": rows}
 
 
 def api_student_upgrade_character(ctx):
@@ -1455,6 +1695,7 @@ def api_student_expand_territory(ctx):
     tiles = s.setdefault("claimedCityTiles", {})
     home = s.get("homeCity", "seoul")
     tiles[home] = int(tiles.get(home, s["claimedTiles"] - 1)) + 1
+    add_land(s, home, 1, tx["amount"])
     s["territoryPurchases"] = purchases + 1
     save_db(DB)
     return {"ok": True, "transaction": tx, "student": student_view(s)}
@@ -1589,13 +1830,25 @@ def api_teacher_world(ctx):
 
 
 # ─────────────────────────── 미션 ───────────────────────────
+def day_key(moment):
+    """아침 8시부터 다음 날 아침 8시 전까지를 하루로 본다 (미션·소득세·행운의 게임 횟수)."""
+    return (moment - timedelta(hours=DAY_START_HOUR)).strftime("%Y-%m-%d")
+
+
+def day_of(stamp):
+    try:
+        return day_key(datetime.fromisoformat(str(stamp)[:19]))
+    except ValueError:
+        return str(stamp or "")[:10]
+
+
 def today_str():
-    return local_now().strftime("%Y-%m-%d")
+    return day_key(local_now())
 
 
 def today_submissions(student_id):
     today = today_str()
-    return [x for x in DB["submissions"] if x["studentId"] == student_id and x["createdAt"].startswith(today)
+    return [x for x in DB["submissions"] if x["studentId"] == student_id and day_of(x["createdAt"]) == today
             and not x.get("assignmentId")]
 
 
@@ -1650,7 +1903,7 @@ def mark_mission_paid(s, mission, amount, stamp):
 def api_teacher_missions(ctx):
     today = today_str()
     subs = DB["submissions"]
-    approved_today = [x for x in subs if x["status"] == "approved" and (x.get("reviewedAt") or "").startswith(today)]
+    approved_today = [x for x in subs if x["status"] == "approved" and day_of(x.get("reviewedAt") or "") == today]
     reviewed = sorted((x for x in subs if x["status"] != "pending"),
                       key=lambda x: x.get("reviewedAt") or x["createdAt"], reverse=True)
     return {
@@ -1853,19 +2106,26 @@ def luck_net(t):
 def class_luck_totals():
     """우리 반 전체가 행운의 게임으로 얻고 잃은 합계 (교육용 통계)"""
     all_luck = [t for t in DB["transactions"] if t["type"] == "luck"]
+    fines = [t for t in DB["transactions"] if t["type"] == "fine" and t.get("fineType") == "gambling"]
     return {"classPlays": len(all_luck), "classNet": sum(luck_net(t) for t in all_luck),
-            "classFees": sum(t.get("fee", 0) for t in all_luck)}
+            "classFees": sum(t.get("fee", 0) for t in all_luck), "classFines": sum(t["amount"] for t in fines)}
+
+
+def luck_fined_today(s, today):
+    return any(t["type"] == "fine" and t.get("fineType") == "gambling" and t["studentId"] == s["id"]
+               and (t.get("date") or day_of(t["createdAt"])) == today for t in DB["transactions"])
 
 
 def luck_info(s):
     today = today_str()
     mine = [t for t in DB["transactions"] if t["studentId"] == s["id"] and t["type"] == "luck"]
-    plays_today = sum(1 for t in mine if t["createdAt"].startswith(today))
+    plays_today = sum(1 for t in mine if day_of(t["createdAt"]) == today)
     wins = sum(1 for t in mine if t.get("win"))
     return {
         "enabled": bool(DB["settings"].get("luckEnabled", True)),
-        "bet": LUCK_BET, "fee": LUCK_FEE, "daily": LUCK_DAILY,
+        "bet": LUCK_BET, "fee": LUCK_FEE, "daily": LUCK_DAILY, "fine": LUCK_FINE,
         "playsToday": plays_today, "remaining": max(0, LUCK_DAILY - plays_today),
+        "finedToday": luck_fined_today(s, today),
         "plays": len(mine), "wins": wins, "losses": len(mine) - wins,
         "fees": sum(t.get("fee", 0) for t in mine), "net": sum(luck_net(t) for t in mine),
         **class_luck_totals(),
@@ -1896,10 +2156,19 @@ def api_student_luck(ctx):
         "reason": f"🍀 행운의 게임 · {'홀' if pick == 'odd' else '짝'} → 구슬 {marbles}개 ({'맞힘' if win else '틀림'})",
         "balanceAfter": s["balance"], "createdAt": now_str(),
     })
+    fine = None
+    today = today_str()
+    if luck_info(s)["playsToday"] >= LUCK_DAILY and not luck_fined_today(s, today):
+        s["balance"] -= LUCK_FINE   # 벌금처럼 걷는다 (모자라면 마이너스)
+        fine = {"id": new_id("t"), "studentId": s["id"], "studentName": s["name"], "type": "fine",
+                "fineType": "gambling", "amount": LUCK_FINE, "date": today,
+                "reason": f"🎓 도박 예방 교육비 (행운의 게임 하루 {LUCK_DAILY}번)",
+                "balanceAfter": s["balance"], "createdAt": now_str()}
+        DB["transactions"].append(fine)
     save_db(DB)
     return {"ok": True, "result": {"marbles": marbles, "pick": pick, "win": win, "bet": LUCK_BET,
                                    "fee": LUCK_FEE, "net": net},
-            "student": student_view(s), "luck": luck_info(s)}
+            "fine": fine, "student": student_view(s), "luck": luck_info(s)}
 
 
 # ─────────────────────────── 웹 버전 저장소 (Vercel + Neon Postgres) ───────────────────────────
@@ -2040,6 +2309,7 @@ def authorize_and_run(fn, need, ctx):
     if need == "teacher" and fn not in PIN_CHANGE_ROUTES and must_change_teacher_pin():
         raise ApiError(403, "먼저 설정에서 선생님 PIN을 바꿔 주세요. (처음 PIN 0000은 웹에서 쓸 수 없어요)",
                        code="CHANGE_TEACHER_PIN")
+    daily_settlement(ctx["session"])
     return fn(ctx)
 
 
@@ -2125,7 +2395,9 @@ ROUTES = [
     ("GET", r"/api/student/shop", api_student_shop, "student"),
     ("POST", r"/api/student/buy", api_student_buy, "student"),
     ("POST", r"/api/student/claim-city", api_student_claim_city, "student"),
+    ("POST", r"/api/student/invade", api_student_invade, "student"),
     ("POST", r"/api/student/taxes", api_student_tax, "student"),
+    ("POST", r"/api/teacher/property-tax/notify", api_property_notify, "teacher"),
     ("POST", r"/api/student/upgrade-character", api_student_upgrade_character, "student"),
     ("POST", r"/api/student/expand-territory", api_student_expand_territory, "student"),
     ("GET", r"/api/student/assignments/([\w-]+)/pdf", api_student_assignment_pdf, "student"),

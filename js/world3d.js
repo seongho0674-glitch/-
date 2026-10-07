@@ -3,7 +3,7 @@
 // - Natural Earth 1:110m 실제 해안선·국경·호수로 그린 3D 지구본 / 평면 세계지도
 // - 21개 도시 마커, 드래그·관성 회전·확대, 나라 이름 표시, 랜드마크 상세창
 // ==========================================================
-import { $, esc } from './core.js';
+import { $, esc, fmt } from './core.js';
 
 const DEG = Math.PI / 180;
 const TAU = Math.PI * 2;
@@ -38,6 +38,145 @@ const wrap180 = (d) => ((((d + 180) % 360) + 360) % 360) - 180;
 const easeInOut = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
 const reduceMotion = () => !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 const safeColor = (c) => (/^#[0-9a-f]{3,8}$/i.test(String(c)) ? c : '#6366f1');
+
+// ─────────────────────────── 도시 국가 영역 ───────────────────────────
+// 21개 도시는 저마다 하나의 '도시 국가'예요. 도시 국가의 경계(옅게 칠한 땅과 테두리)는 이웃 도시와의
+// 가운데 선에서 나뉘고, 그 안에서 학생 영토(진하게 칠한 땅)가 칸 수만큼 넓어져요.
+// 여러 학생이 함께 살면 칸 수만큼 부채꼴로 나눠 학생마다 다른 색으로 칠해요.
+const ZONE_MAX = 18;   // 도시 국가 경계의 가장 큰 반지름 (위도 1도 ≈ 111km)
+const ZONE_STEP = 5;   // 둘레를 그리는 각도 간격
+const ZONE_GAP = 0.4;  // 이웃 도시 국가와 사이를 조금 띄워 경계가 보이게
+/** 영토 칸 수 → 학생 영토 반지름(도). 1칸 늘 때마다 약 67km씩 넓어져 도시 국가 경계까지 자란다 */
+export const zoneRadius = (tiles) => (tiles > 0 ? clamp(2.5 + 0.6 * tiles, 3, ZONE_MAX) : 0);
+/** 도시 국가의 전체 영토 칸 수 */
+export const zoneTiles = (city) => (city.residents || []).reduce((a, r) => a + Math.max(0, Number(r.tiles) || 0), 0);
+
+/** 학생마다 다른 영토 색 (내 영토는 초록. 다른 학생에게는 초록 계열을 쓰지 않는다) */
+export function ownerColor(r, myId = null) {
+  if (myId && r.id === myId) return KIND_COLOR.mine;
+  let n = Number(r.number);
+  if (!Number.isFinite(n) || n <= 0) n = [...String(r.id || '')].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 997, 7);
+  const idx = (n * 8) % 21;                 // 번호가 이웃한 학생끼리 색이 멀어지도록 섞는다
+  const hue = (190 + idx * (270 / 21)) % 360; // 초록(100~190도)은 '내 영토' 몫
+  return `hsl(${Math.round(hue)}, ${n % 2 ? 80 : 70}%, ${n % 2 ? 56 : 64}%)`;
+}
+
+/** 위도·경도에서 방위각(북쪽부터 시계 방향)으로 dist도만큼 간 지점 [경도, 위도] */
+function destPoint(lat, lon, bearing, dist) {
+  const p1 = lat * DEG, l1 = lon * DEG, b = bearing * DEG, d = dist * DEG;
+  const sp2 = Math.sin(p1) * Math.cos(d) + Math.cos(p1) * Math.sin(d) * Math.cos(b);
+  const p2 = Math.asin(clamp(sp2, -1, 1));
+  const l2 = l1 + Math.atan2(Math.sin(b) * Math.sin(d) * Math.cos(p1), Math.cos(d) - Math.sin(p1) * sp2);
+  return [wrap180(l2 / DEG), p2 / DEG];
+}
+
+const unitVec = (lat, lon) => {
+  const a = lat * DEG, o = lon * DEG, c = Math.cos(a);
+  return [c * Math.cos(o), c * Math.sin(o), Math.sin(a)];
+};
+
+/** 도시 국가 영역 (위경도 다각형). 도시 정보가 바뀔 때만 다시 계산한다 */
+function buildZones(cities, myId) {
+  const vecs = cities.map((c) => unitVec(Number(c.lat), Number(c.lon)));
+  return cities.map((c, i) => {
+    const lat = Number(c.lat), lon = Number(c.lon);
+    const [x, y, z] = vecs[i];
+    const sl = Math.sin(lat * DEG), cl = Math.cos(lat * DEG), so = Math.sin(lon * DEG), co = Math.cos(lon * DEG);
+    // 방향마다: 이웃 도시와 똑같이 떨어진 선(두 도시의 가운데)까지의 거리, 최대 cap도
+    const reach = (bearing, cap) => {
+      const b = bearing * DEG, cb = Math.cos(b), sb = Math.sin(b);
+      const tx = -sl * co * cb - so * sb, ty = -sl * so * cb + co * sb, tz = cl * cb;
+      let d = cap;
+      for (let j = 0; j < vecs.length; j++) {
+        if (j === i) continue;
+        const v = vecs[j];
+        const tj = tx * v[0] + ty * v[1] + tz * v[2];
+        if (tj <= 1e-9) continue; // 그 도시에서 멀어지는 방향
+        const m = Math.atan2(1 - (x * v[0] + y * v[1] + z * v[2]), tj) / DEG - ZONE_GAP;
+        if (m < d) d = m;
+      }
+      return Math.max(0.3, d);
+    };
+    // 반시계 방향(북→서→남→동)으로 둘레를 잇는다 (지구본에서 앞면만 자를 때 필요)
+    const ring = (cap) => {
+      const out = [];
+      for (let b = 360; b > 0; b -= ZONE_STEP) out.push(...destPoint(lat, lon, b, reach(b, cap)));
+      return Float64Array.from(out);
+    };
+    const owners = (c.residents || [])
+      .filter((r) => Number(r.tiles) > 0)
+      .sort((a, b) => Number(!!b.isHome) - Number(!!a.isHome) || Number(b.tiles) - Number(a.tiles));
+    const total = owners.reduce((a, r) => a + Number(r.tiles), 0);
+    const R = zoneRadius(total);
+    const parts = [];
+    if (owners.length === 1) {
+      parts.push({ owner: owners[0], ll: ring(R) });
+    } else if (owners.length > 1) {
+      let a0 = 0;
+      for (const r of owners) {
+        const span = (360 * Number(r.tiles)) / total;
+        const steps = Math.max(2, Math.ceil(span / ZONE_STEP));
+        const pts = [lon, lat];
+        for (let k = steps; k >= 0; k--) {
+          const b = a0 + (span * k) / steps;
+          pts.push(...destPoint(lat, lon, b, reach(b, R)));
+        }
+        parts.push({ owner: r, ll: Float64Array.from(pts) });
+        a0 += span;
+      }
+    }
+    for (const p of parts) {
+      p.color = ownerColor(p.owner, myId);
+      p.mine = !!myId && p.owner.id === myId;
+      p.shape = toShape(p.ll);
+    }
+    const domain = ring(ZONE_MAX);
+    const color = owners.length ? ownerColor(owners[0], myId) : null; // 도시 국가 색 = 시작 도시 주인(가장 큰 주인)
+    return { city: c, lat, lon, total, R, parts, color, domain, domainShape: toShape(domain) };
+  });
+}
+
+/** 평면 지도용 경로 (도시를 기준으로 경도를 이어서, 지도 끝을 넘으면 반대쪽에도 그린다) */
+function flatZonePath(ll, lon0) {
+  const lam0 = flatLam(lon0), n = ll.length / 2, lams = new Float64Array(n);
+  let min = Infinity, max = -Infinity;
+  for (let i = 0; i < n; i++) {
+    lams[i] = lam0 + wrap180(ll[2 * i] - lon0);
+    if (lams[i] < min) min = lams[i];
+    if (lams[i] > max) max = lams[i];
+  }
+  const path = new Path2D();
+  const shifts = [0];
+  if (min < -180) shifts.push(360);
+  if (max > 180) shifts.push(-360);
+  for (const sh of shifts) {
+    for (let i = 0; i < n; i++) {
+      const [px, py] = ne1(lams[i] + sh, ll[2 * i + 1]);
+      if (i) path.lineTo(px, py); else path.moveTo(px, py);
+    }
+    path.closePath();
+  }
+  return path;
+}
+
+/** 도시 상세창·정보 패널에 넣는 '도시 국가 영역' 막대 */
+export function zoneBarHTML(city, myId = null) {
+  const owners = (city.residents || []).filter((r) => Number(r.tiles) > 0)
+    .sort((a, b) => Number(!!b.isHome) - Number(!!a.isHome) || Number(b.tiles) - Number(a.tiles));
+  const total = owners.reduce((a, r) => a + Number(r.tiles), 0);
+  if (!total) return '<div class="zone-box empty">🗺️ 아직 주인이 없는 도시 국가예요</div>';
+  const who = (r) => (myId && r.id === myId ? '나' : esc(r.name || '친구'));
+  return `
+    <div class="zone-box">
+      <div class="zone-head"><b>🗺️ 도시 국가 영역 ${fmt(total)}칸</b><small>칸이 늘면 지도 위 색칠한 땅이 넓어져요</small></div>
+      <div class="zone-bar" role="img" aria-label="${owners.map((r) => `${who(r)} ${fmt(r.tiles)}칸`).join(', ')}">
+        ${owners.map((r) => `<i style="flex:${Number(r.tiles)};background:${ownerColor(r, myId)}"></i>`).join('')}
+      </div>
+      <ul class="zone-owners">
+        ${owners.map((r) => `<li><i style="background:${ownerColor(r, myId)}"></i>${who(r)} <b>${fmt(r.tiles)}칸</b>${Number(r.bought) > 0 ? `<small>(넓힌 땅 ${fmt(r.bought)})</small>` : ''}</li>`).join('')}
+      </ul>
+    </div>`;
+}
 
 /** 도시에 사는 학생 기준 상태: 내 영토 / 친구 영토 / 미개척 */
 export function cityKind(city, studentId) {
@@ -394,6 +533,7 @@ export class WorldMap {
     this.hoverCountry = null;
     this.geo = geoCache;
     this.markers = [];
+    this.zones = null;      // 도시 국가 영역 (도시 정보가 바뀌면 다시 계산)
     this.sprites = new Map();
     this.pointers = new Map();
     this.drag = null;
@@ -462,6 +602,7 @@ export class WorldMap {
         ${forTeacher ? '' : '<span><i class="wm-dot k-mine"></i>내 영토</span>'}
         <span><i class="wm-dot k-friend"></i>${forTeacher ? '학생 영토' : '친구 영토'}</span>
         <span><i class="wm-dot k-empty"></i>미개척</span>
+        <span title="옅게 칠한 곳과 테두리는 도시 국가의 경계, 진하게 칠한 곳은 학생 영토예요. 영토 칸이 늘면 진한 땅이 넓어져요."><i class="wm-zone"></i>도시 국가<em class="wm-zone-more"> · 진한 땅 = 영토</em></span>
       </div>`}
       <div class="wm-credit">지도 데이터: Natural Earth</div>`;
     this.canvas = r.querySelector('.wm-canvas');
@@ -540,8 +681,14 @@ export class WorldMap {
 
   setCities(cities) {
     this.cities = cities || [];
+    this.zones = null;
     if (this.hoverCity) this.hoverCity = this.cityById(this.hoverCity.id);
     this.invalidate();
+  }
+
+  zoneList() {
+    if (!this.zones) this.zones = buildZones(this.cities, this.o.currentStudentId);
+    return this.zones;
   }
 
   /** 도시를 고르고 그 도시로 날아간다 (onSelectCity는 부르지 않음) */
@@ -549,7 +696,7 @@ export class WorldMap {
     this.selectedId = id || null;
     const c = this.cityById(id);
     if (c && fly) this.focus(c);
-    this.invalidate(false);
+    this.invalidate(); // 고른 도시 국가의 경계를 금색으로 다시 그린다
   }
 
   focus(city, animate = true) {
@@ -1032,6 +1179,7 @@ export class WorldMap {
       for (const s of geo.lakes) this.globeLine(ctx, s, F, true);
       ctx.stroke();
     }
+    this.drawZonesGlobe(ctx, F);
     ctx.restore();
 
     // 햇빛과 그림자로 둥근 느낌
@@ -1105,11 +1253,111 @@ export class WorldMap {
       ctx.stroke(f.coast);
       ctx.stroke(f.lakes);
     }
+    this.drawZonesFlat(ctx, px);
     ctx.restore();
     // 둥근 테두리
     ctx.strokeStyle = 'rgba(175, 225, 255, 0.65)';
     ctx.lineWidth = 1.3 * px;
     ctx.stroke(st.outline);
+    ctx.restore();
+  }
+
+  // ---------- 도시 국가 영역 ----------
+  /** 지구본: 앞면에 보이는 부분만 칠한다 (지구 테두리에서 자름) */
+  drawZonesGlobe(ctx, F) {
+    const zones = this.zoneList();
+    const lw = this.compact ? 1.1 : 1.8;
+    ctx.save();
+    ctx.lineJoin = 'round';
+    // 도시 국가: 옅게 칠한 땅 + 테두리 (주인이 없으면 점선)
+    for (const z of zones) {
+      ctx.beginPath();
+      this.globeRing(ctx, z.domainShape, F);
+      if (z.color) {
+        ctx.globalAlpha = this.compact ? 0.16 : 0.2;
+        ctx.fillStyle = z.color;
+        ctx.fill();
+      }
+      if (this.compact) continue;
+      ctx.beginPath();
+      this.globeLine(ctx, z.domainShape, F, true);
+      ctx.globalAlpha = z.color ? 0.85 : 0.55;
+      ctx.strokeStyle = z.color || '#ffffff';
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash(z.color ? [] : [4, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 1;
+    // 학생 영토: 칸 수만큼 넓어지는 진한 땅
+    for (const z of zones) {
+      for (const p of z.parts) {
+        ctx.beginPath();
+        this.globeRing(ctx, p.shape, F);
+        ctx.globalAlpha = p.mine ? 0.66 : 0.55;
+        ctx.fillStyle = p.color;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.beginPath();
+        this.globeLine(ctx, p.shape, F, true);
+        ctx.strokeStyle = p.mine ? '#ffffff' : p.color;
+        ctx.lineWidth = p.mine ? lw + 0.6 : lw;
+        ctx.stroke();
+      }
+    }
+    const sel = zones.find((z) => z.city.id === this.selectedId);
+    if (sel && !this.compact) {
+      ctx.beginPath();
+      this.globeLine(ctx, sel.domainShape, F, true);
+      ctx.strokeStyle = '#ffd76a';
+      ctx.lineWidth = 2.6;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /** 평면 지도: 도법 좌표로 만든 경로를 그대로 쓴다 (px = 화면 1px의 도법 좌표 길이) */
+  drawZonesFlat(ctx, px) {
+    const zones = this.zoneList();
+    for (const z of zones) {
+      if (!z.domainFlat) z.domainFlat = flatZonePath(z.domain, z.lon);
+      for (const p of z.parts) if (!p.flat) p.flat = flatZonePath(p.ll, z.lon);
+    }
+    ctx.save();
+    ctx.lineJoin = 'round';
+    for (const z of zones) {
+      if (z.color) {
+        ctx.globalAlpha = this.compact ? 0.16 : 0.22;
+        ctx.fillStyle = z.color;
+        ctx.fill(z.domainFlat);
+      }
+      if (this.compact) continue;
+      ctx.globalAlpha = z.color ? 0.85 : 0.55;
+      ctx.strokeStyle = z.color || '#ffffff';
+      ctx.lineWidth = 1.2 * px;
+      ctx.setLineDash(z.color ? [] : [4 * px, 4 * px]);
+      ctx.stroke(z.domainFlat);
+      ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 1;
+    const lw = this.compact ? 1.1 : 1.8;
+    for (const z of zones) {
+      for (const p of z.parts) {
+        ctx.globalAlpha = p.mine ? 0.66 : 0.55;
+        ctx.fillStyle = p.color;
+        ctx.fill(p.flat);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = p.mine ? '#ffffff' : p.color;
+        ctx.lineWidth = (p.mine ? lw + 0.6 : lw) * px;
+        ctx.stroke(p.flat);
+      }
+    }
+    const sel = zones.find((z) => z.city.id === this.selectedId);
+    if (sel && !this.compact) {
+      ctx.strokeStyle = '#ffd76a';
+      ctx.lineWidth = 2.6 * px;
+      ctx.stroke(sel.domainFlat);
+    }
     ctx.restore();
   }
 
@@ -1272,7 +1520,8 @@ export class WorldMap {
       if (this.compact && pri < 2) continue;
       const own = { x: m.hx - m.r, y: m.hy - m.r, w: m.r * 2, h: m.r * 2 };
       const others = taken.filter((b) => !(b.x === own.x && b.y === own.y));
-      const text = m.city.name;
+      const tiles = this.compact ? 0 : zoneTiles(m.city);
+      const text = tiles ? `${m.city.name} · ${tiles}칸` : m.city.name;
       const w = ctx.measureText(text).width + 14, h = 20;
       const spots = [
         { x: m.x - w / 2, y: m.y + 5 },
@@ -1494,7 +1743,7 @@ export class WorldMap {
       const kind = cityKind(city, this.o.currentStudentId);
       const n = (city.residents || []).length;
       this.showTip(x, y, `<b>${city.emoji || '📍'} ${esc(city.name)}</b><span>${esc(city.country)} · ${esc(city.landmark)}</span>
-        <span class="wm-tip-kind k-${kind}">${KIND_LABEL[kind]}${n ? ` · 동물 친구 ${n}` : ''}</span>`);
+        <span class="wm-tip-kind k-${kind}">${KIND_LABEL[kind]}${n ? ` · 동물 친구 ${n}` : ''}${zoneTiles(city) ? ` · 영토 ${zoneTiles(city)}칸` : ''}</span>`);
     } else if (country) {
       this.showTip(x, y, `<b>${esc(country.name)}</b><span>${esc(country.en)}</span>`);
     } else this.hideTip();
@@ -1533,7 +1782,7 @@ export function createWorldMap(root, opts) {
 // ─────────────────────────────────────────────────────────────
 // 도시 상세창: 랜드마크 / 동물 친구
 // ─────────────────────────────────────────────────────────────
-export function openCityModal(city, { currentStudent = null, isTeacher = false, currencyName = '코인', claimCost = 200, onClaimCity, onGive } = {}) {
+export function openCityModal(city, { currentStudent = null, isTeacher = false, currencyName = '코인', claimCost = 200, onClaimCity, onGive, onInvade, tab = 'landmark' } = {}) {
   const root = $('#modal-root');
   if (!root) return null;
   const residents = city.residents || [];
@@ -1546,28 +1795,52 @@ export function openCityModal(city, { currentStudent = null, isTeacher = false, 
       ? `👥 ${isTeacher ? '학생' : '친구'} ${residents.length}명이 살고 있어요`
       : '✨ 아직 아무도 없는 미개척지예요';
   const cur = esc(currencyName);
+  const balance = Number(currentStudent?.balance) || 0;
+  // 침공: 다른 학생이 코인으로 넓힌 땅만 (처음 받은 시작 영토는 지킬 수 있다)
+  const targets = !isTeacher && currentStudent && onInvade ? residents.filter((r) => r.id !== myId && Number(r.invadeCost) > 0) : [];
 
   const claim = isTeacher || !currentStudent ? '' : kind === 'mine'
     ? `<div class="claim-done">🚩 ${esc(mine?.animal?.name || '내 수호동물')}와 함께 지키는 내 영토예요 · 영토 ${mine?.tiles ?? 0}칸</div>`
     : `<div class="claim-box">
         <div>
           <b>✨ 이 도시에 깃발을 꽂아 볼까요?</b>
-          <p>${claimCost} ${cur}으로 영토 1칸을 넓히고, 이 도시 친구들과 이웃이 돼요.</p>
+          <p>${fmt(claimCost)} ${cur}으로 영토 1칸을 넓히고, 이 도시 친구들과 이웃이 돼요.</p>
         </div>
-        <button class="btn btn-gold" data-claim>🚩 ${claimCost} ${cur}로 개척하기</button>
+        <button class="btn btn-gold" data-claim>🚩 ${fmt(claimCost)} ${cur}로 개척하기</button>
       </div>`;
+  const invadeHint = targets.length ? `
+    <div class="invade-box">
+      <div>
+        <b>⚔️ 이 도시에는 침공할 수 있는 영토가 있어요</b>
+        <p>친구가 ${cur}으로 넓힌 땅은 그 친구가 낸 ${cur}의 2배보다 많이 내면 차지할 수 있어요. 낸 ${cur}은 돌려받지 못해요.</p>
+      </div>
+      <button class="btn btn-take" data-goto-animals>⚔️ 침공할 땅 보기</button>
+    </div>` : '';
+
+  const landLine = (r) => {
+    const bought = Number(r.bought) || 0;
+    if (!bought) return `<small class="resident-land">🛡️ 처음 받은 땅만 있어요 · 침공할 수 없어요</small>`;
+    return `<small class="resident-land">🪙 ${cur}으로 넓힌 땅 ${fmt(bought)}칸 · 낸 ${cur} ${fmt(r.paid)} · 침공하려면 <b>${fmt(r.invadeCost)}</b> ${cur}</small>`;
+  };
+  const invadeBtn = (r) => {
+    if (!targets.includes(r)) return '';
+    const cost = Number(r.invadeCost);
+    const short = balance < cost;
+    return `<button class="btn btn-take btn-sm" data-invade="${esc(r.id)}" ${short ? `disabled title="${cur}이 ${fmt(cost - balance)}만큼 부족해요"` : ''}>⚔️ 침공 · ${fmt(cost)} ${cur}</button>`;
+  };
 
   const people = residents.length ? `
     <div class="resident-grid">
       ${residents.map((r) => `
-        <article class="resident ${r.id === myId ? 'mine' : ''}">
+        <article class="resident ${r.id === myId ? 'mine' : ''}" style="--owner:${ownerColor(r, myId)}">
           <span class="resident-emoji" aria-hidden="true">${r.animal?.emoji || '🐾'}</span>
           <div class="resident-info">
             <div class="resident-name"><b>${esc(r.animal?.name || '동물 친구')}</b> <small>${esc(r.animal?.species || '')}</small> <span class="lv-pill">캐릭터 Lv.${Number(r.characterLevel) || 1}</span></div>
             <div class="resident-title">${esc(r.animal?.title || '숲의 지킴이')}</div>
-            <small class="muted">${r.id === myId ? '나' : esc(r.name)} · ${r.isHome ? '🏡 시작 도시' : '🚩 개척한 도시'} · 영토 ${Number(r.tiles) || 0}칸</small>
+            <small class="muted"><i class="owner-dot" aria-hidden="true"></i>${r.id === myId ? '나' : esc(r.name)} · ${r.isHome ? '🏡 시작 도시' : '🚩 개척한 도시'} · 영토 ${Number(r.tiles) || 0}칸</small>
+            ${landLine(r)}
           </div>
-          ${isTeacher && onGive ? `<button class="btn btn-give btn-sm" data-give="${esc(r.id)}">🎁 보상</button>` : ''}
+          ${isTeacher && onGive ? `<button class="btn btn-give btn-sm" data-give="${esc(r.id)}">🎁 보상</button>` : invadeBtn(r)}
         </article>`).join('')}
     </div>` : `
     <div class="empty"><span class="emo">🌱</span>아직 이 도시에 사는 동물 친구가 없어요.<br>${isTeacher ? '' : '가장 먼저 깃발을 꽂아 첫 주인이 되어 보세요!'}</div>`;
@@ -1604,9 +1877,11 @@ export function openCityModal(city, { currentStudent = null, isTeacher = false, 
             ${(city.tags || []).map((t) => `<span class="city-tag"># ${esc(t)}</span>`).join('')}
             ${city.wikiUrl ? `<a class="city-wiki" href="${esc(city.wikiUrl)}" target="_blank" rel="noopener noreferrer">📖 위키백과에서 더 알아보기 ↗</a>` : ''}
           </div>
+          ${zoneBarHTML(city, myId)}
           ${claim}
+          ${invadeHint}
         </section>
-        <section id="city-pane-animals" role="tabpanel" aria-labelledby="city-tab-animals" hidden>${people}</section>
+        <section id="city-pane-animals" role="tabpanel" aria-labelledby="city-tab-animals" hidden>${zoneBarHTML(city, myId)}${people}</section>
       </div>
     </div>`;
   root.appendChild(wrap);
@@ -1623,13 +1898,14 @@ export function openCityModal(city, { currentStudent = null, isTeacher = false, 
   wrap.querySelector('[data-close]').addEventListener('click', close);
 
   const tabs = [...wrap.querySelectorAll('[role="tab"]')];
-  tabs.forEach((tab) => tab.addEventListener('click', () => {
-    tabs.forEach((t) => {
-      const on = t === tab;
-      t.setAttribute('aria-selected', String(on));
-      wrap.querySelector(`#${t.getAttribute('aria-controls')}`).hidden = !on;
-    });
-  }));
+  const showTab = (tabEl) => tabs.forEach((t) => {
+    const on = t === tabEl;
+    t.setAttribute('aria-selected', String(on));
+    wrap.querySelector(`#${t.getAttribute('aria-controls')}`).hidden = !on;
+  });
+  tabs.forEach((t) => t.addEventListener('click', () => showTab(t)));
+  if (tab === 'animals') showTab(tabs[1]);
+  wrap.querySelector('[data-goto-animals]')?.addEventListener('click', () => showTab(tabs[1]));
 
   wrap.querySelector('[data-claim]')?.addEventListener('click', async () => {
     close();
@@ -1638,6 +1914,12 @@ export function openCityModal(city, { currentStudent = null, isTeacher = false, 
   wrap.querySelectorAll('[data-give]').forEach((b) => b.addEventListener('click', () => {
     close();
     onGive?.(b.dataset.give);
+  }));
+  wrap.querySelectorAll('[data-invade]').forEach((b) => b.addEventListener('click', () => {
+    const target = residents.find((r) => r.id === b.dataset.invade);
+    if (!target) return;
+    close();
+    onInvade?.(city, target);
   }));
   wrap.querySelector('[data-close]').focus();
   return { close };
